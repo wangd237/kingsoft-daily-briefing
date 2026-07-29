@@ -49,7 +49,7 @@ class StcnCrawler(BaseCrawler):
             scores[category] = score
         if scores and max(scores.values()) > 0:
             return max(scores, key=scores.get)
-        return "①资本动态"
+        return "资本动态"
 
     def _parse_time(self, time_str: str) -> str:
         """解析时间"""

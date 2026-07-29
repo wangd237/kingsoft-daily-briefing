@@ -36,7 +36,7 @@ class HKEXCrawler(BaseCrawler):
         }
         if scores and max(scores.values()) > 0:
             return max(scores, key=lambda k: scores[k])
-        return "①资本动态"
+        return "资本动态"
 
     def _parse_time(self, time_str: str) -> str:
         """解析时间"""

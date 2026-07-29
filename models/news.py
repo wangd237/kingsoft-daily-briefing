@@ -17,11 +17,11 @@ class CredibilityLevel(Enum):
 
 class NewsCategory(Enum):
     """资讯分类"""
-    CAPITAL = "①资本动态"
-    PRODUCT = "②产品动态"
-    COOPERATION = "③市场&政企合作"
-    EVENT = "④活动IP"
-    HR = "⑤人事&其他声明"
+    CAPITAL = "资本动态"
+    PRODUCT = "产品动态"
+    COOPERATION = "市场&政企合作"
+    EVENT = "活动IP"
+    HR = "人事&其他声明"
 
 
 @dataclass

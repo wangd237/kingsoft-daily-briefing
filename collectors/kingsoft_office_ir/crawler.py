@@ -4,17 +4,17 @@
 使用 Playwright 浏览器自动化
 采集新闻和公告栏目
 """
-import sys
 import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-
-from datetime import datetime
-from typing import List
-from playwright.sync_api import sync_playwright
-import time
-
+import re
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
+from typing import List
+
+from playwright.sync_api import sync_playwright
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from collectors.base import BaseCrawler, NewsItem
@@ -33,31 +33,32 @@ class KingsoftOfficeIRCrawler(BaseCrawler):
 
     def __init__(self):
         super().__init__()
-        self.base_url = "https://www.kingsoftoffice.com"
+        self.base_url = "https://www.wps.cn/KINGSOFT"
         # 尝试多个URL模式
         self.news_urls = [
-            "https://www.kingsoftoffice.com/ir/news",
-            "https://www.kingsoftoffice.com/investor/news",
-            "http://www.kingsoftoffice.com/ir/news",
-            "https://ir.kingsoftoffice.com/news",
+            "https://www.wps.cn/KINGSOFT/ir/news",
+            "https://www.wps.cn/KINGSOFT/investor/news",
+            "http://www.wps.cn/KINGSOFT/ir/news",
+            "https://ir.wps.cn/news",
         ]
         self.announcements_urls = [
-            "https://www.kingsoftoffice.com/ir/announcements",
-            "https://www.kingsoftoffice.com/investor/announcements",
-            "http://www.kingsoftoffice.com/ir/announcements",
-            "https://ir.kingsoftoffice.com/announcements",
+            "https://www.wps.cn/KINGSOFT/ir/announcements",
+            "https://www.wps.cn/KINGSOFT/investor/announcements",
+            "http://www.wps.cn/KINGSOFT/ir/announcements",
+            "https://ir.wps.cn/announcements",
         ]
 
     def _auto_classify(self, title: str) -> str:
         """自动分类"""
         title_lower = title.lower()
-        scores = {}
+        scores: dict[str, int] = {}
         for category, rules in CATEGORIES.items():
             score = sum(1 for kw in rules['keywords'] if kw in title_lower)
             scores[category] = score
         if scores and max(scores.values()) > 0:
-            return max(scores, key=scores.get)
-        return "①资本动态"
+            best_category = max(scores.items(), key=lambda x: x[1])[0]
+            return best_category
+        return '资本动态'
 
     def _parse_time(self, time_str: str) -> str:
         """解析时间"""
