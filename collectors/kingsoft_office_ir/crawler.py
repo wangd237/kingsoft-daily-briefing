@@ -60,37 +60,6 @@ class KingsoftOfficeIRCrawler(BaseCrawler):
             return best_category
         return '资本动态'
 
-    def _parse_time(self, time_str: str) -> str:
-        """解析时间"""
-        if not time_str:
-            return datetime.now().strftime('%Y-%m-%d')
-
-        time_str = time_str.strip()
-        formats = [
-            '%Y-%m-%d',
-            '%Y/%m/%d',
-            '%Y年%m月%d日',
-            '%d/%m/%Y',
-            '%B %d, %Y',
-            '%b %d, %Y',
-        ]
-
-        for fmt in formats:
-            try:
-                dt = datetime.strptime(time_str, fmt)
-                return dt.strftime('%Y-%m-%d')
-            except:
-                continue
-
-        # 尝试提取日期模式
-        import re
-        date_match = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', time_str)
-        if date_match:
-            year, month, day = date_match.groups()
-            return f"{year}-{int(month):02d}-{int(day):02d}"
-
-        return time_str
-
     def _fetch_from_page(self, page, urls: list, section_name: str) -> List[dict]:
         """从指定页面提取数据，支持多URL尝试"""
         last_error = None

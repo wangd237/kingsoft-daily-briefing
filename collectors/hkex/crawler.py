@@ -38,22 +38,6 @@ class HKEXCrawler(BaseCrawler):
             return max(scores, key=lambda k: scores[k])
         return "资本动态"
 
-    def _parse_time(self, time_str: str) -> str:
-        """解析时间"""
-        if not time_str:
-            return datetime.now().strftime('%Y-%m-%d')
-
-        time_str = time_str.strip()
-        formats = ['%d/%m/%Y', '%Y-%m-%d', '%Y/%m/%d', '%d-%m-%Y']
-
-        for fmt in formats:
-            try:
-                return datetime.strptime(time_str, fmt).strftime('%Y-%m-%d')
-            except ValueError:
-                continue
-
-        return time_str
-
     def fetch(self, max_pages: int = 1) -> list[NewsItem]:
         """采集公告数据"""
         items = []

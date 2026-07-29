@@ -166,3 +166,57 @@ class BaseCrawler(ABC):
         """上下文管理器退出时自动保存"""
         if self.items:
             self.save()
+
+    def _parse_time(self, time_str: str) -> str:
+        """
+        解析时间字符串，返回 YYYY-MM-DD 格式
+        子类可覆盖以支持特定格式
+        """
+        if not time_str or time_str.strip() == '':
+            return ''
+
+        time_str = time_str.strip()
+
+        # 标准格式
+        formats = [
+            '%Y-%m-%d',
+            '%Y/%m/%d',
+            '%d/%m/%Y',      # 港式日期
+            '%d-%m-%Y',
+            '%B %d, %Y',     # 英文 December 31, 2025
+            '%b %d, %Y',     # 英文 Dec 31, 2025
+            '%Y年%m月%d日',   # 中文日期
+            '%Y年%m月%d',
+            '%Y-%m-%d %H:%M:%S',
+            '%Y-%m-%d %H:%M',
+        ]
+
+        for fmt in formats:
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(time_str, fmt)
+                return dt.strftime('%Y-%m-%d')
+            except:
+                continue
+
+        # 正则提取日期
+        import re
+        patterns = [
+            (r'(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日?', 1),  # 2025年12月31日
+            (r'(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})', 1),   # 2025/12/31
+            (r'(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})', 3),   # 31/12/2025
+        ]
+        for pattern, year_idx in patterns:
+            match = re.search(pattern, time_str)
+            if match:
+                groups = match.groups()
+                if year_idx == 1:
+                    year, month, day = groups[0], groups[1], groups[2]
+                else:
+                    day, month, year = groups[0], groups[1], groups[2]
+                try:
+                    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+                except:
+                    pass
+
+        return ''

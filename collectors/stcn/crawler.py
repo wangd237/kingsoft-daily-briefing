@@ -51,15 +51,6 @@ class StcnCrawler(BaseCrawler):
             return max(scores, key=scores.get)
         return "资本动态"
 
-    def _parse_time(self, time_str: str) -> str:
-        """解析时间"""
-        if not time_str:
-            return datetime.now().strftime('%Y-%m-%d')
-        # 如果是时间戳
-        if isinstance(time_str, int):
-            return datetime.fromtimestamp(time_str).strftime('%Y-%m-%d %H:%M')
-        return str(time_str)
-
     def _fetch_page(self, page: int = 1) -> List[NewsItem]:
         """获取单页"""
         items = []
