@@ -177,16 +177,10 @@ class BaseCrawler(ABC):
 
         time_str = time_str.strip()
 
-        # 标准格式
+        # 标准格式（优先）
         formats = [
-            '%Y-%m-%d',
-            '%Y/%m/%d',
-            '%d/%m/%Y',      # 港式日期
-            '%d-%m-%Y',
-            '%B %d, %Y',     # 英文 December 31, 2025
-            '%b %d, %Y',     # 英文 Dec 31, 2025
-            '%Y年%m月%d日',   # 中文日期
-            '%Y年%m月%d',
+            '%Y-%m-%d',      # 2025-12-31
+            '%Y/%m/%d',      # 2025/12/31
             '%Y-%m-%d %H:%M:%S',
             '%Y-%m-%d %H:%M',
         ]
@@ -199,24 +193,44 @@ class BaseCrawler(ABC):
             except:
                 continue
 
-        # 正则提取日期
-        import re
-        patterns = [
-            (r'(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日?', 1),  # 2025年12月31日
-            (r'(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})', 1),   # 2025/12/31
-            (r'(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})', 3),   # 31/12/2025
+        # 其他格式需要额外验证
+        other_formats = [
+            ('%d/%m/%Y', 'DMY'),      # 31/12/2025 港式
+            ('%d-%m-%Y', 'DMY'),      # 31-12-2025
+            ('%B %d, %Y', 'MDY'),     # December 31, 2025
+            ('%b %d, %Y', 'MDY'),     # Dec 31, 2025
+            ('%Y年%m月%d日', 'YMD'),   # 2025年12月31日
+            ('%Y年%m月%d', 'YMD'),     # 2025年12月31
         ]
-        for pattern, year_idx in patterns:
-            match = re.search(pattern, time_str)
-            if match:
-                groups = match.groups()
-                if year_idx == 1:
-                    year, month, day = groups[0], groups[1], groups[2]
-                else:
-                    day, month, year = groups[0], groups[1], groups[2]
-                try:
-                    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
-                except:
-                    pass
+
+        for fmt, fmt_type in other_formats:
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(time_str, fmt)
+
+                # 验证日期合理性
+                if dt.month > 12 or dt.day > 31:
+                    continue
+
+                return dt.strftime('%Y-%m-%d')
+            except:
+                continue
+
+        # 正则提取日期（安全模式）
+        import re
+        # 优先匹配 YYYY-MM-DD 或 YYYY/MM/DD
+        match = re.match(r'^(\d{4})[\-/](\d{1,2})[\-/](\d{1,2})$', time_str)
+        if match:
+            year, month, day = match.groups()
+            try:
+                month_int = int(month)
+                day_int = int(day)
+                # 验证月份和日期范围
+                if 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                    from datetime import datetime
+                    dt = datetime(int(year), month_int, day_int)
+                    return dt.strftime('%Y-%m-%d')
+            except:
+                pass
 
         return ''

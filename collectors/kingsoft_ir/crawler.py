@@ -249,6 +249,79 @@ class KingsoftIRCrawler(BaseCrawler):
 
         return content[:max_length] + '...'
 
+    def _extract_date_from_content(self, text: str) -> str:
+        """
+        从内容文本中提取日期
+        支持格式：
+        - HKE-EPS_YYYYMMDD_xxxxx (PDF文件名)
+        - 美式日期 M/D/YY 或 MM/DD/YYYY
+        - 繁体中文日期 二零二五年十二月三十一日
+        """
+        if not text:
+            return ""
+
+        import re
+
+        # 模式1：PDF文件名 HKE-EPS_20260728_12259563_0 或 HKE -EPS_20260612_12201116_0
+        # 注意：实际文本中可能是 "HKE -EPS_20260612" 有空格
+        match = re.search(r'HKE\s*-?\s*EPS[_\s-](\d{4})(\d{2})(\d{2})[_\s-]', text)
+        if match:
+            year, month, day = match.groups()
+            return f"{year}-{month}-{day}"
+
+        # 模式2：英文完整日期 Wednesday, 27 May 2026
+        month_map = {
+            'january': '01', 'february': '02', 'march': '03', 'april': '04',
+            'may': '05', 'june': '06', 'july': '07', 'august': '08',
+            'september': '09', 'october': '10', 'november': '11', 'december': '12',
+            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
+            'jun': '06', 'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
+        }
+        match = re.search(r'(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})', text, re.IGNORECASE)
+        if match:
+            day, month_str, year = match.groups()
+            month = month_map.get(month_str.lower()[:3], '01')
+            return f"{year}-{month}-{int(day):02d}"
+
+        # 模式3：美式日期带时间 5/27/26 7:00 PM
+        match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{2,4})\s+\d{1,2}:\d{2}', text)
+        if match:
+            month, day, year = match.groups()
+            if len(year) == 2:
+                year = '20' + year if int(year) < 50 else '19' + year
+            return f"{year}-{int(month):02d}-{int(day):02d}"
+
+        # 模式4：标准日期格式 2025-12-31 或 2025/12/31
+        match = re.search(r'(\d{4})[\-/](\d{1,2})[\-/](\d{1,2})', text)
+        if match:
+            year, month, day = match.groups()
+            month_int = int(month)
+            day_int = int(day)
+            if 1 <= month_int <= 12 and 1 <= day_int <= 31:
+                return f"{year}-{month_int:02d}-{day_int:02d}"
+
+        # 模式5：美式日期 5/27/26 (无时间，最后尝试)
+        match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{2,4})', text)
+        if match:
+            month, day, year = match.groups()
+            if len(year) == 2:
+                year = '20' + year if int(year) < 50 else '19' + year
+            return f"{year}-{int(month):02d}-{int(day):02d}"
+
+        # 模式6：繁体中文日期
+        match = re.search(r'([零一二三四五六七八九十]{4})年([一二三四五六七八九十]{1,2})月', text)
+        if match:
+            year_str, month_str = match.groups()
+            chinese_nums = {'零': '0', '一': '1', '二': '2', '三': '3', '四': '4',
+                           '五': '5', '六': '6', '七': '7', '八': '8', '九': '9'}
+            year = ''.join(chinese_nums.get(c, c) for c in year_str)
+            month_map_cn = {'一': '01', '二': '02', '三': '03', '四': '04', '五': '05', '六': '06',
+                           '七': '07', '八': '08', '九': '09', '十': '10', '十一': '11', '十二': '12'}
+            month = month_map_cn.get(month_str, '01')
+            return f"{year}-{month}-01"
+
+        return ""
+
     def _auto_classify(self, title: str) -> str:
         """自动分类"""
         title_lower = title.lower()
@@ -534,9 +607,13 @@ class KingsoftIRCrawler(BaseCrawler):
                         if not summary:
                             summary = title
 
-                        # 优先使用列表页的日期，如果为空则使用详情页的日期
+                        # 优先使用详情页的日期，如果为空则使用列表页的日期
                         list_date = news.get('time', '')
-                        final_date = list_date if list_date else date_from_detail
+                        final_date = date_from_detail if date_from_detail else list_date
+
+                        # 如果还是为空，尝试从内容中提取
+                        if not final_date and (content or summary):
+                            final_date = self._extract_date_from_content(content + ' ' + summary)
 
                         item = NewsItem(
                             title=title,
