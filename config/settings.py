@@ -5,6 +5,13 @@
 import os
 from pathlib import Path
 
+# 尝试加载 .env 文件
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv 未安装时跳过
+
 # 项目根目录
 BASE_DIR = Path(__file__).parent.parent
 
