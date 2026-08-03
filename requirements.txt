@@ -1,0 +1,16 @@
+# 网络请求
+requests>=2.31.0
+httpx>=0.25.0
+
+# 浏览器自动化
+playwright>=1.40.0
+
+# PDF 解析（二选一即可，推荐 pymupdf 速度更快）
+pymupdf>=1.23.0  # 也叫 fitz
+pdfplumber>=0.10.0  # 备选方案
+
+# AI 接口
+openai>=1.0.0
+
+# 环境变量
+python-dotenv>=1.0.0
