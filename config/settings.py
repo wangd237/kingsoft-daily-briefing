@@ -34,6 +34,7 @@ COLLECTORS = {
         'stock_code': '688111',
         'org_id': '9900035303',
         'credibility': '【官方公告】',
+        'enable_summary': True,  # 启用 AI 摘要
     },
     'hkex': {
         'enabled': False,  # 待实现
@@ -43,6 +44,13 @@ COLLECTORS = {
             {'code': '03896', 'name': '金山云'},
         ],
         'credibility': '【官方公告】',
+        'enable_summary': False,
+    },
+    'kingsoft_ir': {
+        'enabled': True,
+        'name': '金山软件IR官网',
+        'credibility': '【官方公告】',
+        'enable_summary': True,  # 启用 AI 摘要
     },
     'wechat': {
         'enabled': False,  # 待实现
@@ -55,18 +63,21 @@ COLLECTORS = {
             '剑网3',
         ],
         'credibility': '【官方资讯】',
+        'enable_summary': False,
     },
     'weibo': {
         'enabled': False,
         'name': '官方微博',
         'accounts': [],
         'credibility': '【官方资讯】',
+        'enable_summary': False,
     },
     'media': {
         'enabled': False,
         'name': '财经媒体',
         'sources': ['cls', '36kr', 'huxiu'],
         'credibility': '【媒体报道】',
+        'enable_summary': False,
     },
     'xiaoyou': {
         'enabled': False,
@@ -76,6 +87,7 @@ COLLECTORS = {
             {'id': 'cbjq', 'name': '尘白禁区'},
         ],
         'credibility': '【官方资讯】',
+        'enable_summary': False,
     }
 }
 

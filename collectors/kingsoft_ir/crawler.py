@@ -18,7 +18,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from collectors.base import BaseCrawler
 from models.news import NewsItem
-from config.settings import CATEGORIES
+from config.settings import CATEGORIES, COLLECTORS
 
 
 class KingsoftIRCrawler(BaseCrawler):
@@ -31,8 +31,13 @@ class KingsoftIRCrawler(BaseCrawler):
     source_code = "kingsoft_ir"
     credibility_base = "【官方公告】"
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, enable_summary: bool = None):
+        # 从配置读取 enable_summary
+        config = COLLECTORS.get('kingsoft_ir', {})
+        if enable_summary is None:
+            enable_summary = config.get('enable_summary', False)
+
+        super().__init__(enable_summary=enable_summary)
         self.base_url = "https://ir.kingsoft.com"
         self.sections = [
             {
@@ -599,10 +604,23 @@ class KingsoftIRCrawler(BaseCrawler):
                         seen_urls.add(dedup_key)
 
                         # 获取详情页内容、摘要和日期
-                        content, summary, date_from_detail = "", "", ""
+                        content, old_summary, date_from_detail = "", "", ""
                         if url:
                             self.logger.info(f"[{section_name}] 获取详情: {title[:40]}...")
-                            content, summary, date_from_detail = self._get_detail_content(page, url, section_name)
+                            content, old_summary, date_from_detail = self._get_detail_content(page, url, section_name)
+
+                        # 生成 AI 摘要（如果启用且内容足够）
+                        summary = old_summary
+                        summary_generated_at = None
+                        if content and len(content.strip()) >= 50:
+                            self.logger.info(f"  正在生成 AI 摘要...")
+                            ai_summary, gen_time = self.generate_summary(title, content)
+                            if ai_summary:
+                                summary = ai_summary
+                                summary_generated_at = gen_time
+                                self.logger.info(f"  ✓ AI 摘要生成成功: {len(ai_summary)} 字")
+                            else:
+                                self.logger.warning(f"  ✗ AI 摘要生成失败")
 
                         # 如果没有获取到摘要，使用标题作为备选
                         if not summary:
@@ -625,6 +643,7 @@ class KingsoftIRCrawler(BaseCrawler):
                             credibility_tag=self.credibility_base,
                             category=self._auto_classify(title),
                             summary=summary,
+                            summary_generated_at=summary_generated_at,
                             content=content,
                             raw_data={
                                 'section': section_name,

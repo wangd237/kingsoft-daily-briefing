@@ -5,7 +5,7 @@
 """
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 import logging
 import json
@@ -49,12 +49,23 @@ class BaseCrawler(ABC):
     source_code: str = ""           # 信息源代码（短标识）
     credibility_base: str = ""      # 基础可信度标签
 
-    def __init__(self, output_dir: str = "output/data", log_dir: str = "output/logs"):
+    def __init__(self, output_dir: str = "output/data", log_dir: str = "output/logs", enable_summary: bool = False):
         self.output_dir = output_dir
         self.log_dir = log_dir
         self.logger = self._setup_logger()
         self.items: List[NewsItem] = []
         self._batch_dir: Optional[str] = None  # 子类可以设置批次目录
+
+        # 初始化 AI 摘要器（如果启用）
+        self.summarizer = None
+        if enable_summary:
+            try:
+                from models.ai_summarizer import get_summarizer
+                self.summarizer = get_summarizer()
+                if not self.summarizer.is_available():
+                    self.logger.warning("AI 摘要服务不可用")
+            except Exception as e:
+                self.logger.warning(f"AI 摘要模块加载失败: {e}")
 
     def _setup_logger(self) -> logging.Logger:
         """设置日志"""
@@ -187,8 +198,28 @@ class BaseCrawler(ABC):
             self.logger.error(f"采集失败: {e}", exc_info=True)
             raise
 
-    def __enter__(self):
-        return self
+    def generate_summary(self, title: str, content: str, max_length: int = 150) -> Tuple[Optional[str], Optional[datetime]]:
+        """
+        生成 AI 摘要
+
+        Args:
+            title: 标题
+            content: 正文内容
+            max_length: 摘要最大字数
+
+        Returns:
+            (摘要文本, 生成时间)，失败返回 (None, None)
+        """
+        if not self.summarizer or not self.summarizer.is_available():
+            return None, None
+
+        if not content or len(content.strip()) < 50:
+            return None, None
+
+        result = self.summarizer.summarize(title, content, max_length=max_length)
+        if result:
+            return result
+        return None, None
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """上下文管理器退出时自动保存"""

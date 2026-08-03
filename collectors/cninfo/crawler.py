@@ -27,19 +27,22 @@ class CNInfoCrawler(BaseCrawler):
     source_code = "cninfo"
     credibility_base = "【官方公告】"
 
-    def __init__(self, max_items: int = 5, enable_summary: bool = True):
+    def __init__(self, max_items: int = 5, enable_summary: bool = None):
         """
         初始化
 
         Args:
             max_items: 最多抓取几条公告（默认5条）
-            enable_summary: 是否启用 AI 摘要（默认开启）
+            enable_summary: 是否启用 AI 摘要（默认从配置读取）
         """
         config = COLLECTORS.get('cninfo', {})
         self.stock_code = config.get('stock_code', '688111')
         self.org_id = config.get('org_id', '9900035303')
         self.max_items = max_items
-        self.enable_summary = enable_summary
+
+        # 从配置读取 enable_summary，未设置则默认为 True
+        if enable_summary is None:
+            enable_summary = config.get('enable_summary', True)
 
         # 初始化 PDF 处理器（不指定下载目录，后续动态设置）
         try:
@@ -49,18 +52,7 @@ class CNInfoCrawler(BaseCrawler):
             self.logger.error(f"PDF 处理器初始化失败: {e}")
             self.pdf_processor = None
 
-        # 延迟导入 AI 摘要器
-        self.summarizer = None
-        if enable_summary:
-            try:
-                from models.ai_summarizer import get_summarizer
-                self.summarizer = get_summarizer()
-                if not self.summarizer.is_available():
-                    self.logger.warning("AI 摘要服务不可用，将只下载 PDF 不生成摘要")
-            except Exception as e:
-                self.logger.warning(f"AI 摘要模块加载失败: {e}")
-
-        super().__init__()
+        super().__init__(enable_summary=enable_summary)
 
     def _auto_classify(self, title: str) -> str:
         """自动分类"""
@@ -93,19 +85,6 @@ class CNInfoCrawler(BaseCrawler):
         if result:
             return result
 
-        return None, None
-
-    def _generate_summary(self, title: str, content: str) -> Tuple[Optional[str], Optional[datetime]]:
-        """生成 AI 摘要，返回 (摘要, 生成时间)"""
-        if not self.summarizer or not self.summarizer.is_available():
-            return None, None
-
-        if not content or len(content.strip()) < 50:
-            return None, None
-
-        result = self.summarizer.summarize(title, content, max_length=150)
-        if result:
-            return result  # 已经是 (summary, datetime) 元组
         return None, None
 
     def fetch(self) -> List[NewsItem]:
@@ -208,16 +187,15 @@ class CNInfoCrawler(BaseCrawler):
                         item.raw_data = {'pdf_path': rel_pdf_path}
                         self.logger.info(f"  ✓ PDF 解析成功: {len(content)} 字符")
 
-                        # 生成 AI 摘要
-                        if self.enable_summary and self.summarizer:
-                            self.logger.info(f"  正在生成 AI 摘要...")
-                            summary, summary_time = self._generate_summary(ann['title'], content)
-                            if summary:
-                                item.summary = summary
-                                item.summary_generated_at = summary_time
-                                self.logger.info(f"  ✓ AI 摘要生成成功: {len(summary)} 字")
-                            else:
-                                self.logger.warning(f"  ✗ AI 摘要生成失败")
+                        # 生成 AI 摘要（使用基类方法）
+                        self.logger.info(f"  正在生成 AI 摘要...")
+                        summary, summary_time = self.generate_summary(ann['title'], content)
+                        if summary:
+                            item.summary = summary
+                            item.summary_generated_at = summary_time
+                            self.logger.info(f"  ✓ AI 摘要生成成功: {len(summary)} 字")
+                        else:
+                            self.logger.warning(f"  ✗ AI 摘要生成失败")
                     elif pdf_path:
                         # 存储相对路径
                         rel_pdf_path = os.path.relpath(pdf_path, self._batch_dir)
