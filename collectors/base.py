@@ -5,53 +5,40 @@
 """
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import List
-from dataclasses import dataclass
+from typing import List, Optional
+from pathlib import Path
 import logging
 import json
 import os
 
+from models.news import NewsItem
 
-@dataclass
-class NewsItem:
-    """资讯条目数据模型"""
-    title: str
-    date: str
-    url: str
-    source: str = ""                    # 信息源名称
-    source_code: str = ""               # 信息源代码
-    credibility_tag: str = "【官方公告】" # 【官方公告】/【官方资讯】/【媒体报道】
-    category: str = ""                  # ①资本动态 ②产品动态 ③市场合作 ④活动IP ⑤人事其他
-    publish_time: datetime = None
-    summary: str = ""
-    content: str = ""
-    raw_data: dict = None               # 原始数据
 
-    def __post_init__(self):
-        if self.publish_time is None and self.date:
-            try:
-                self.publish_time = datetime.strptime(self.date, '%Y-%m-%d')
-            except:
-                try:
-                    self.publish_time = datetime.strptime(self.date, '%Y-%m-%d %H:%M:%S')
-                except:
-                    pass
+def load_content_from_ref(content_ref: str, base_dir: str = "output/data") -> str:
+    """
+    根据 content_ref 加载正文内容
 
-    def to_dict(self) -> dict:
-        """转换为字典"""
-        return {
-            'title': self.title,
-            'date': self.date,
-            'url': self.url,
-            'source': self.source,
-            'source_code': self.source_code,
-            'credibility_tag': self.credibility_tag,
-            'category': self.category,
-            'publish_time': self.publish_time.isoformat() if self.publish_time else None,
-            'summary': self.summary,
-            'content': self.content,
-            'raw_data': self.raw_data
-        }
+    Args:
+        content_ref: 内容文件引用路径
+        base_dir: 数据根目录
+
+    Returns:
+        正文内容，失败返回空字符串
+    """
+    if not content_ref:
+        return ""
+
+    try:
+        content_path = Path(base_dir) / content_ref
+        if content_path.exists():
+            with open(content_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        else:
+            logging.getLogger(__name__).warning(f"内容文件不存在: {content_path}")
+    except OSError as e:
+        logging.getLogger(__name__).error(f"加载内容文件失败: {e}")
+
+    return ""
 
 
 class BaseCrawler(ABC):
@@ -67,6 +54,7 @@ class BaseCrawler(ABC):
         self.log_dir = log_dir
         self.logger = self._setup_logger()
         self.items: List[NewsItem] = []
+        self._batch_dir: Optional[str] = None  # 子类可以设置批次目录
 
     def _setup_logger(self) -> logging.Logger:
         """设置日志"""
@@ -98,33 +86,65 @@ class BaseCrawler(ABC):
         today = datetime.now().strftime('%Y/%m/%d')
         return f"{self.log_dir}/collectors/{self.source_code}/{today}.log"
 
-    def _get_data_path(self) -> str:
-        """获取数据文件路径"""
+    def _get_data_path(self) -> tuple:
+        """
+        获取数据文件路径
+        返回 (批次目录路径, json文件名)
+        批次目录结构：output/data/cninfo/2026/07/31/cninfo_20260731_155933/
+        """
+        # 如果子类已经设置了批次目录，直接使用
+        if self._batch_dir:
+            batch_dir = self._batch_dir
+            json_filename = f"{Path(batch_dir).name}.json"
+            return batch_dir, json_filename
+
+        # 否则创建新的批次目录
         now = datetime.now()
         date_dir = now.strftime('%Y/%m/%d')
-        filename = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S.json')
-        return f"{self.output_dir}/{self.source_code}/{date_dir}/{filename}"
-
-    @abstractmethod
-    def fetch(self) -> List[NewsItem]:
-        """
-        采集数据的主方法
-        子类必须实现
-        """
-        pass
+        batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
+        batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
+        json_filename = f"{batch_name}.json"
+        return batch_dir, json_filename
 
     def save(self) -> str:
         """
-        保存采集的数据到JSON文件
+        保存采集的数据到JSON文件（分级存储）
+        - content 存到单独文本文件
+        - JSON 只存 content_ref 引用
         返回保存的文件路径
         """
         if not self.items:
             self.logger.warning("没有数据可保存")
             return ""
 
-        file_path = self._get_data_path()
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        batch_dir, json_filename = self._get_data_path()
+        os.makedirs(batch_dir, exist_ok=True)
 
+        # 构建完整的JSON路径
+        json_path = os.path.join(batch_dir, json_filename)
+
+        # 保存正文内容到批次目录下的 contents 子目录
+        content_dir = os.path.join(batch_dir, "contents")
+        os.makedirs(content_dir, exist_ok=True)
+
+        for idx, item in enumerate(self.items):
+            if item.content and len(item.content.strip()) > 0:
+                # 生成内容文件名（使用索引保证唯一）
+                content_filename = f"ann_{idx:03d}.txt"
+                content_path = os.path.join(content_dir, content_filename)
+
+                try:
+                    with open(content_path, 'w', encoding='utf-8') as f:
+                        f.write(item.content)
+
+                    # 设置相对引用路径（相对于批次目录）
+                    item.content_ref = f"contents/{content_filename}"
+                    self.logger.debug(f"正文已保存: {content_path}")
+                except OSError as e:
+                    self.logger.error(f"保存正文失败: {e}")
+                    item.content_ref = ""
+
+        # 保存 JSON（不包含 content，只存引用）
         data = {
             'source': self.source_name,
             'source_code': self.source_code,
@@ -133,11 +153,19 @@ class BaseCrawler(ABC):
             'items': [item.to_dict() for item in self.items]
         }
 
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-        self.logger.info(f"数据已保存: {file_path}")
-        return file_path
+        self.logger.info(f"数据已保存: {json_path} (批次目录: {batch_dir})")
+        return json_path
+
+    @abstractmethod
+    def fetch(self) -> List[NewsItem]:
+        """
+        采集数据的主方法
+        子类必须实现
+        """
+        pass
 
     def run(self) -> List[NewsItem]:
         """

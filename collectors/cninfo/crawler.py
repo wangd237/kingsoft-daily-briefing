@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-巨潮资讯采集器
-支持详情页内容抓取和 AI 摘要生成
+巨潮资讯采集器（PDF 版本）
+下载公告 PDF -> 解析文本 -> AI 摘要
 """
 import sys
 import io
@@ -9,14 +9,14 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 from datetime import datetime
-from typing import List, Optional
-from playwright.sync_api import sync_playwright
+from typing import List, Optional, Tuple
+from pathlib import Path
 
 import sys
-from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from collectors.base import BaseCrawler, NewsItem
+from collectors.base import BaseCrawler
+from models.news import NewsItem
 from config.settings import COLLECTORS
 
 
@@ -41,6 +41,14 @@ class CNInfoCrawler(BaseCrawler):
         self.max_items = max_items
         self.enable_summary = enable_summary
 
+        # 初始化 PDF 处理器（不指定下载目录，后续动态设置）
+        try:
+            from models.pdf_processor import PDFProcessor
+            self.pdf_processor = PDFProcessor()  # 不指定默认目录
+        except Exception as e:
+            self.logger.error(f"PDF 处理器初始化失败: {e}")
+            self.pdf_processor = None
+
         # 延迟导入 AI 摘要器
         self.summarizer = None
         if enable_summary:
@@ -48,7 +56,7 @@ class CNInfoCrawler(BaseCrawler):
                 from models.ai_summarizer import get_summarizer
                 self.summarizer = get_summarizer()
                 if not self.summarizer.is_available():
-                    self.logger.warning("AI 摘要服务不可用，将只抓取正文不生成摘要")
+                    self.logger.warning("AI 摘要服务不可用，将只下载 PDF 不生成摘要")
             except Exception as e:
                 self.logger.warning(f"AI 摘要模块加载失败: {e}")
 
@@ -70,131 +78,58 @@ class CNInfoCrawler(BaseCrawler):
 
         return "资本动态"
 
-    def _extract_content_from_detail(self, page, url: str) -> Optional[str]:
+    def _extract_pdf_content(self, detail_url: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        访问详情页并提取公告正文
-
-        Args:
-            page: Playwright page 对象
-            url: 详情页 URL
+        从详情页提取 PDF 内容
 
         Returns:
-            正文纯文本，失败返回 None
+            (PDF本地路径, 提取的文本内容)
         """
-        try:
-            self.logger.debug(f"访问详情页: {url}")
-            page.goto(url, wait_until='networkidle', timeout=15000)
-            page.wait_for_timeout(2000)  # 等待内容渲染
+        if not self.pdf_processor:
+            self.logger.warning("PDF 处理器不可用")
+            return None, None
 
-            # 尝试多种选择器提取正文
-            content_selectors = [
-                '.detail-content',      # 常见正文容器
-                '.main-content',
-                '.content',
-                '#content',
-                '.announcement-detail',
-                'article',
-                '.page-content',
-            ]
+        result = self.pdf_processor.process(detail_url, self.stock_code)
+        if result:
+            return result
 
-            content = None
+        return None, None
 
-            # 方法1：查找专门的正文容器
-            for selector in content_selectors:
-                try:
-                    element = page.locator(selector).first
-                    if element.count() > 0:
-                        content = element.inner_text()
-                        if content and len(content.strip()) > 100:
-                            self.logger.debug(f"使用选择器 {selector} 提取到 {len(content)} 字符")
-                            break
-                except:
-                    continue
-
-            # 方法2：如果没找到，尝试提取所有段落
-            if not content:
-                paragraphs = page.locator('p, div').all_inner_texts()
-                # 过滤太短的段落，合并长段落
-                valid_paras = [p.strip() for p in paragraphs if len(p.strip()) > 30]
-                if valid_paras:
-                    content = '\n'.join(valid_paras[:50])  # 最多取50段
-                    self.logger.debug(f"通过段落提取到 {len(content)} 字符")
-
-            # 方法3：最后手段，提取 body 文本
-            if not content:
-                content = page.locator('body').inner_text()
-                self.logger.debug(f"通过 body 提取到 {len(content)} 字符")
-
-            if content:
-                # 清理内容
-                content = self._clean_content(content)
-                return content
-
-            return None
-
-        except Exception as e:
-            self.logger.error(f"详情页提取失败 {url}: {e}")
-            return None
-
-    def _clean_content(self, content: str) -> str:
-        """清理公告正文"""
-        if not content:
-            return ""
-
-        # 移除常见无用文本
-        useless_patterns = [
-            '证券代码：',
-            '证券简称：',
-            '公告编号：',
-            '本公司董事会及全体董事保证本公告内容不存在任何虚假记载',
-            '误导性陈述或者重大遗漏',
-            '并对其内容的真实性、准确性和完整性承担法律责任',
-            '↑↑↑',
-            '返回顶部',
-            '打印',
-            '分享到',
-        ]
-
-        lines = content.split('\n')
-        cleaned_lines = []
-
-        for line in lines:
-            line = line.strip()
-            # 跳过空行
-            if not line:
-                continue
-            # 跳过无用内容
-            if any(pattern in line for pattern in useless_patterns):
-                continue
-            # 跳过过短的行（可能是导航等）
-            if len(line) < 5:
-                continue
-            cleaned_lines.append(line)
-
-        # 重新组合，限制长度
-        result = '\n'.join(cleaned_lines)
-
-        # 如果还是太长，取前8000字符
-        if len(result) > 8000:
-            result = result[:8000] + "\n...（内容已截断）"
-
-        return result
-
-    def _generate_summary(self, title: str, content: str) -> Optional[str]:
-        """生成 AI 摘要"""
+    def _generate_summary(self, title: str, content: str) -> Tuple[Optional[str], Optional[datetime]]:
+        """生成 AI 摘要，返回 (摘要, 生成时间)"""
         if not self.summarizer or not self.summarizer.is_available():
-            return None
+            return None, None
 
         if not content or len(content.strip()) < 50:
-            return None
+            return None, None
 
-        return self.summarizer.summarize(title, content, max_length=150)
+        result = self.summarizer.summarize(title, content, max_length=150)
+        if result:
+            return result  # 已经是 (summary, datetime) 元组
+        return None, None
 
     def fetch(self) -> List[NewsItem]:
-        """抓取公告数据（包含详情页内容）"""
+        """抓取公告数据（下载 PDF 并解析）"""
+        from playwright.sync_api import sync_playwright
+        import os
+
         items = []
 
         self.logger.info(f"开始采集巨潮资讯 - 股票代码: {self.stock_code}, 计划采集: {self.max_items}条")
+
+        # 创建批次目录
+        from datetime import datetime
+        now = datetime.now()
+        date_dir = now.strftime('%Y/%m/%d')
+        batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
+        self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
+        os.makedirs(self._batch_dir, exist_ok=True)
+        self.logger.info(f"批次目录: {self._batch_dir}")
+
+        # 设置 PDF 下载目录为批次目录下的 pdfs 子目录
+        if self.pdf_processor:
+            pdf_dir = os.path.join(self._batch_dir, "pdfs")
+            self.pdf_processor.set_download_dir(pdf_dir)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -224,8 +159,8 @@ class CNInfoCrawler(BaseCrawler):
                         const texts = [];
                         cells.forEach(c => texts.push(c.textContent?.trim() || ''));
 
-                        const dateMatch = texts.find(t => /\d{4}-\d{2}-\d{2}/.test(t));
-                        const title = texts.filter(t => t && !/\d{4}-\d{2}-\d{2}/.test(t))
+                        const dateMatch = texts.find(t => /\\d{4}-\\d{2}-\\d{2}/.test(t));
+                        const title = texts.filter(t => t && !/\\d{4}-\\d{2}-\\d{2}/.test(t))
                                           .sort((a,b) => b.length - a.length)[0] || '';
                         const link = row.querySelector('a')?.href || '';
 
@@ -241,7 +176,7 @@ class CNInfoCrawler(BaseCrawler):
 
             self.logger.info(f"列表页提取到 {len(announcements)} 条公告")
 
-            # 限制数量，逐个抓取详情
+            # 限制数量，逐个处理
             announcements = announcements[:self.max_items]
 
             for idx, ann in enumerate(announcements, 1):
@@ -261,35 +196,46 @@ class CNInfoCrawler(BaseCrawler):
                     category=self._auto_classify(ann['title']),
                 )
 
-                # 抓取详情页内容
-                if ann['url']:
-                    content = self._extract_content_from_detail(page, ann['url'])
-                    if content:
+                # 下载并解析 PDF
+                if ann['url'] and self.pdf_processor:
+                    self.logger.info(f"  正在下载 PDF...")
+                    pdf_path, content = self._extract_pdf_content(ann['url'])
+
+                    if pdf_path and content:
                         item.content = content
-                        self.logger.info(f"  ✓ 正文提取成功: {len(content)} 字符")
+                        # 存储相对路径（相对于批次目录）
+                        rel_pdf_path = os.path.relpath(pdf_path, self._batch_dir)
+                        item.raw_data = {'pdf_path': rel_pdf_path}
+                        self.logger.info(f"  ✓ PDF 解析成功: {len(content)} 字符")
 
                         # 生成 AI 摘要
                         if self.enable_summary and self.summarizer:
-                            summary = self._generate_summary(ann['title'], content)
+                            self.logger.info(f"  正在生成 AI 摘要...")
+                            summary, summary_time = self._generate_summary(ann['title'], content)
                             if summary:
                                 item.summary = summary
-                                self.logger.info(f"  ✓ AI摘要生成成功: {len(summary)} 字")
+                                item.summary_generated_at = summary_time
+                                self.logger.info(f"  ✓ AI 摘要生成成功: {len(summary)} 字")
                             else:
-                                self.logger.warning(f"  ✗ AI摘要生成失败")
+                                self.logger.warning(f"  ✗ AI 摘要生成失败")
+                    elif pdf_path:
+                        # 存储相对路径
+                        rel_pdf_path = os.path.relpath(pdf_path, self._batch_dir)
+                        item.raw_data = {'pdf_path': rel_pdf_path}
+                        self.logger.warning(f"  ⚠ PDF 下载成功但文本提取失败")
                     else:
-                        self.logger.warning(f"  ✗ 正文提取失败")
+                        self.logger.warning(f"  ✗ PDF 下载失败")
 
                 items.append(item)
 
             browser.close()
 
-        self.logger.info(f"采集完成: {len(items)} 条（含详情内容和摘要）")
+        self.logger.info(f"采集完成: {len(items)} 条（含 PDF 和摘要）")
         return items
 
 
 def main():
     """测试运行"""
-    # 从环境变量读取配置，默认抓5条
     import os
     max_items = int(os.getenv('CNINFO_MAX_ITEMS', '5'))
     enable_summary = os.getenv('CNINFO_ENABLE_SUMMARY', 'true').lower() == 'true'
@@ -307,20 +253,27 @@ def main():
         print(f"   日期: {item.date}")
         print(f"   链接: {item.url}")
 
-        if item.content:
-            content_preview = item.content[:200].replace('\n', ' ')
-            print(f"   正文预览: {content_preview}...")
+        if item.raw_data and item.raw_data.get('pdf_path'):
+            print(f"   PDF: {item.raw_data['pdf_path']}")
         else:
-            print(f"   正文: [未获取]")
+            print(f"   PDF: [未下载]")
 
         if item.summary:
             print(f"   AI摘要: {item.summary}")
+            if item.summary_generated_at:
+                print(f"   摘要时间: {item.summary_generated_at.strftime('%Y-%m-%d %H:%M:%S')}")
         else:
             print(f"   AI摘要: [未生成]")
 
+        if item.content:
+            preview = item.content[:200].replace('\n', ' ') if len(item.content) > 200 else item.content
+            print(f"   内容预览: {preview}...")
+
     print(f"\n{'='*70}")
-    print("数据已保存到 output/data/cninfo/ 目录")
-    print('='*70)
+    print("数据结构：")
+    print("  - JSON文件：包含标题、日期、摘要、PDF路径")
+    print("  - output/data/pdfs/：下载的 PDF 文件")
+    print("="*70)
 
 
 if __name__ == "__main__":

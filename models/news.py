@@ -42,10 +42,12 @@ class NewsItem:
 
     # 时间
     publish_time: datetime = None
+    summary_generated_at: datetime = None  # 摘要生成时间
 
     # 内容
     summary: str = ""
     content: str = ""
+    content_ref: str = ""  # 正文文件引用路径
 
     # 原始数据（调试用）
     raw_data: Dict[str, Any] = field(default_factory=dict)
@@ -86,8 +88,10 @@ class NewsItem:
             'credibility_tag': self.credibility_tag,
             'category': self.category,
             'publish_time': self.publish_time.isoformat() if self.publish_time else None,
+            'summary_generated_at': self.summary_generated_at.isoformat() if self.summary_generated_at else None,
             'summary': self.summary,
             'content': self.content,
+            'content_ref': self.content_ref,
             'raw_data': self.raw_data,
         }
 
@@ -104,13 +108,21 @@ class NewsItem:
             category=data.get('category', ''),
             summary=data.get('summary', ''),
             content=data.get('content', ''),
-            raw_data=data.get('raw_data', {}),
+            content_ref=data.get('content_ref', ''),
+            raw_data=data.get('raw_data') or {},
         )
 
-        # 处理时间
+        # 处理 publish_time
         if 'publish_time' in data and data['publish_time']:
             try:
                 item.publish_time = datetime.fromisoformat(data['publish_time'])
+            except:
+                pass
+
+        # 处理 summary_generated_at
+        if 'summary_generated_at' in data and data['summary_generated_at']:
+            try:
+                item.summary_generated_at = datetime.fromisoformat(data['summary_generated_at'])
             except:
                 pass
 

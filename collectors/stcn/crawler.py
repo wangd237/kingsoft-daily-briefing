@@ -18,7 +18,8 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from collectors.base import BaseCrawler, NewsItem
+from collectors.base import BaseCrawler
+from models.news import NewsItem
 from config.settings import CATEGORIES
 
 
