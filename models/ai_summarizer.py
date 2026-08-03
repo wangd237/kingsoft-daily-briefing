@@ -5,7 +5,8 @@ AI 摘要生成模块
 """
 import os
 import logging
-from typing import Optional
+from datetime import datetime
+from typing import Optional, Tuple
 
 try:
     import openai
@@ -49,7 +50,7 @@ class AISummarizer:
         import httpx
         return httpx.Client(proxy=self.proxy)
 
-    def summarize(self, title: str, content: str, max_length: int = 150) -> Optional[str]:
+    def summarize(self, title: str, content: str, max_length: int = 150) -> Optional[Tuple[str, datetime]]:
         """
         生成公告摘要
 
@@ -59,7 +60,7 @@ class AISummarizer:
             max_length: 摘要最大字数
 
         Returns:
-            摘要文本，失败返回 None
+            (摘要文本, 生成时间)，失败返回 None
         """
         if not self.client:
             self.logger.debug("AI 客户端未初始化，跳过摘要生成")
@@ -95,7 +96,7 @@ class AISummarizer:
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=300,
+                max_tokens=5000,
                 timeout=30
             )
 
@@ -105,7 +106,7 @@ class AISummarizer:
             summary = summary.strip('"\'')
 
             self.logger.info(f"摘要生成成功: {title[:30]}... ({len(summary)}字)")
-            return summary
+            return summary, datetime.now()  # 返回摘要和生成时间
 
         except Exception as e:
             self.logger.error(f"摘要生成失败: {e}")
