@@ -78,7 +78,7 @@ class NewsItem:
                 continue
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
+        """转换为字典（content 存到外部文件，JSON 只存 content_ref）"""
         return {
             'title': self.title,
             'date': self.date,
@@ -90,7 +90,7 @@ class NewsItem:
             'publish_time': self.publish_time.isoformat() if self.publish_time else None,
             'summary_generated_at': self.summary_generated_at.isoformat() if self.summary_generated_at else None,
             'summary': self.summary,
-            'content': self.content,
+            # 'content': self.content,  # 内容存到外部文件，通过 content_ref 引用
             'content_ref': self.content_ref,
             'raw_data': self.raw_data,
         }
