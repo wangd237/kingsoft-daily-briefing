@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 证券时报e公司采集器
-使用 requests + 从window.__INITIAL_STATE__提取数据
+使用 Playwright 模拟浏览器获取搜索结果
 支持多关键词搜索、当天过滤、详情页正文抓取、AI 摘要
 """
 import sys
@@ -9,12 +9,10 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-import requests
 import re
-import json
 from datetime import datetime
-from typing import List, Dict, Set
 from pathlib import Path
+from urllib.parse import quote
 import time
 import os
 
@@ -33,11 +31,11 @@ class StcnCrawler(BaseCrawler):
     source_code = "stcn"
     credibility_base = "【媒体报道】"
 
-    def __init__(self, enable_summary: bool = True, test_date: str | None = None, skip_date_filter: bool = False):
+    def __init__(self, enable_summary: bool = True, test_date: str | None = None, skip_date_filter: bool = True):
         # 从配置读取参数
         config = COLLECTORS.get('stcn', {})
         self.keywords = config.get('keywords', ['金山办公'])
-        self.max_pages_per_keyword = 3  # 每个关键词最多爬取页数
+        self.max_items_per_keyword = 5  # 每个关键词最多采集条数
 
         # 从配置读取 enable_summary（如果配置为 false 则覆盖传入值）
         config_enable_summary = config.get('enable_summary', True)
@@ -47,24 +45,19 @@ class StcnCrawler(BaseCrawler):
         self.skip_date_filter = skip_date_filter
 
         # 日期过滤（支持测试日期）
-        # 优先使用传入的 test_date，其次从环境变量读取，最后使用当前日期
         import os
         env_date = os.getenv('STCN_TEST_DATE')
         target_date = test_date or env_date
 
         if self.skip_date_filter:
-            # 跳过日期过滤模式
             self.today = target_date or datetime.now().strftime('%Y-%m-%d')
             self.today_slash = self.today.replace('-', '/')
             self.logger_info = f"⚠️ 日期过滤已禁用 - 参考日期: {self.today}"
         elif target_date:
-            # 测试模式：使用指定日期
             self.today = target_date
-            # 将 YYYY-MM-DD 转换为 YYYY/MM/DD
             self.today_slash = target_date.replace('-', '/')
             self.logger_info = f"测试模式 - 目标日期: {self.today}"
         else:
-            # 正常模式：使用当天
             self.today = datetime.now().strftime('%Y-%m-%d')
             self.today_slash = datetime.now().strftime('%Y/%m/%d')
             self.logger_info = f"正常模式 - 当天日期: {self.today}"
@@ -72,15 +65,9 @@ class StcnCrawler(BaseCrawler):
         super().__init__(enable_summary=final_enable_summary)
 
         self.base_url = "https://egs.stcn.com"
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-        })
 
         # 已抓取的URL集合（用于去重）
-        self.seen_urls: Set[str] = set()
+        self.seen_urls: set[str] = set()
 
     def _auto_classify(self, title: str) -> str:
         """自动分类"""
@@ -89,13 +76,12 @@ class StcnCrawler(BaseCrawler):
         for category, rules in CATEGORIES.items():
             score = sum(1 for kw in rules['keywords'] if kw in title_lower)
             scores[category] = score
-        if scores and max(scores.values()) > 0:
+        if scores and max(scores.values(), default=0) > 0:
             return max(scores, key=scores.get)
         return "资本动态"
 
     def _is_today(self, time_str: str) -> bool:
         """判断时间是否为当天"""
-        # 如果禁用日期过滤，总是返回 True
         if self.skip_date_filter:
             return True
 
@@ -117,202 +103,23 @@ class StcnCrawler(BaseCrawler):
             '%Y/%m/%d %H:%M',
             '%Y/%m/%d',
             '%m-%d %H:%M',
-            '%H:%M',  # 只有时间，假设是当天
+            '%H:%M',
         ]
 
         for fmt in formats:
             try:
                 parsed = datetime.strptime(time_str, fmt)
-                # 只有时间的格式，假设是当天
                 if fmt == '%H:%M':
                     return True
-                # 对比日期部分
+                if fmt == '%m-%d %H:%M':
+                    # 假设是今年
+                    parsed = parsed.replace(year=datetime.now().year)
+                    return parsed.strftime('%Y-%m-%d') == self.today
                 return parsed.strftime('%Y-%m-%d') == self.today
             except ValueError:
                 continue
 
-        # 如果无法解析，默认包含（避免漏掉）
         return True
-
-    def _fetch_page(self, keyword: str, page: int = 1) -> List[Dict]:
-        """获取单页搜索结果"""
-        results = []
-
-        import urllib.parse
-        from bs4 import BeautifulSoup
-
-        encoded = urllib.parse.quote(keyword)
-        url = f"{self.base_url}/news/search.html?keyword={encoded}"
-        if page > 1:
-            url += f"&page={page}"
-
-        self.logger.info(f"[{keyword}] 请求第{page}页: {url}")
-
-        try:
-            resp = self.session.get(url, timeout=30)
-            resp.encoding = 'utf-8'
-
-            if resp.status_code != 200:
-                self.logger.error(f"[{keyword}] HTTP {resp.status_code}")
-                return results
-
-            html = resp.text
-
-            # 调试：保存 HTML 查看结构
-            debug_file = f"output/logs/stcn_debug_{keyword}_{page}.html"
-            os.makedirs(os.path.dirname(debug_file), exist_ok=True)
-            with open(debug_file, 'w', encoding='utf-8') as f:
-                f.write(html[:50000])  # 只保存前 50000 字符
-            self.logger.info(f"[{keyword}] 调试 HTML 已保存: {debug_file}")
-
-            # 使用 BeautifulSoup 解析 HTML
-            soup = BeautifulSoup(html, 'html.parser')
-
-            # 查找资讯列表 - 在 data-type="news" 的 div 中
-            news_container = soup.find('div', attrs={'data-type': 'news'})
-            if not news_container:
-                self.logger.warning(f"[{keyword}] 未找到资讯容器")
-                return results
-
-            # 查找所有列表项
-            news_items = news_container.find_all('li')
-            self.logger.info(f"[{keyword}] 找到 {len(news_items)} 个 li 元素")
-
-            news_list = []
-            for item in news_items:
-                # 提取标题和链接
-                title_elem = item.select_one('.title a')
-                if not title_elem:
-                    continue
-
-                title = title_elem.get_text(strip=True)
-                href = title_elem.get('href', '')
-
-                # 提取时间
-                time_elem = item.select_one('.info span:last-child')
-                time_str = time_elem.get_text(strip=True) if time_elem else ''
-
-                if title and href:
-                    news_list.append({
-                        'title': title,
-                        'url': href if href.startswith('http') else self.base_url + href,
-                        'time': time_str
-                    })
-
-            self.logger.info(f"[{keyword}] 第{page}页找到 {len(news_list)} 条有效资讯")
-
-            # 过滤导航词
-            nav_words = ['首页', '推荐', '快讯', '解读', '股市', '港股通', '视听', 'VIP', '更多', '下一页', '上一页']
-
-            for news in news_list:
-                if isinstance(news, dict):
-                    title = news.get('title', '')
-                    url = news.get('url', '')
-                    time_str = news.get('time', news.get('ctime', news.get('publishTime', '')))
-                else:
-                    continue
-
-                # 过滤无效数据
-                if not title or len(title) < 10:
-                    continue
-                if any(w in title for w in nav_words):
-                    continue
-                if not url.startswith('http'):
-                    url = self.base_url + url
-
-                # 时间过滤 - 只保留当天
-                if not self._is_today(time_str):
-                    self.logger.debug(f"[{keyword}] 跳过非当天: {time_str} - {title[:30]}...")
-                    continue
-
-                results.append({
-                    'title': title,
-                    'url': url,
-                    'time': time_str,
-                    'keyword': keyword,
-                })
-
-        except Exception as e:
-            self.logger.error(f"[{keyword}] 请求失败: {e}")
-
-        return results
-
-    def _fetch_content(self, url: str) -> str:
-        """获取详情页正文内容"""
-        try:
-            from bs4 import BeautifulSoup
-
-            resp = self.session.get(url, timeout=30)
-            resp.encoding = 'utf-8'
-
-            if resp.status_code != 200:
-                self.logger.warning(f"详情页请求失败: {url} (HTTP {resp.status_code})")
-                return ""
-
-            soup = BeautifulSoup(resp.text, 'html.parser')
-
-            # 尝试多种正文选择器
-            content_selectors = [
-                'article',  # 标准文章标签
-                '.article-content',  # 常见文章容器
-                '.content-detail',  # 详情内容
-                '.news-content',  # 新闻内容
-                '.text-content',  # 文本内容
-                '#content',  # ID 选择器
-                '.main-content',  # 主内容区
-                '.detail-content',  # 详情内容
-            ]
-
-            content = ""
-            for selector in content_selectors:
-                element = soup.select_one(selector)
-                if element:
-                    # 提取纯文本
-                    content = element.get_text(separator='\n', strip=True)
-                    if len(content) > 100:  # 确保内容足够长
-                        break
-
-            # 如果上面的选择器都没找到，尝试提取 body 中的段落
-            if not content or len(content) < 100:
-                paragraphs = soup.find_all('p')
-                content = '\n'.join(p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 20)
-
-            # 清理内容
-            content = self._clean_content(content)
-
-            return content
-
-        except Exception as e:
-            self.logger.error(f"获取详情页失败: {url} - {e}")
-            return ""
-
-    def _clean_content(self, content: str) -> str:
-        """清理正文内容"""
-        if not content:
-            return ""
-
-        # 移除多余空白行
-        lines = [line.strip() for line in content.split('\n') if line.strip()]
-        content = '\n'.join(lines)
-
-        # 移除常见的无关文本
-        noise_patterns = [
-            r'分享到.*',
-            r'相关新闻.*',
-            r'推荐阅读.*',
-            r'热门文章.*',
-            r'版权声明.*',
-            r'免责声明.*',
-            r'\(编辑.*\)',
-            r'\(责任编辑.*\)',
-            r'返回首页.*',
-            r'返回顶部.*',
-        ]
-
-        for pattern in noise_patterns:
-            content = re.sub(pattern, '', content, flags=re.IGNORECASE)
-
-        return content.strip()
 
     def _parse_time(self, time_str: str) -> str:
         """解析时间字符串，返回 YYYY-MM-DD 格式"""
@@ -321,7 +128,6 @@ class StcnCrawler(BaseCrawler):
 
         time_str = time_str.strip()
 
-        # 标准格式
         formats = [
             '%Y-%m-%d %H:%M:%S',
             '%Y-%m-%d %H:%M',
@@ -338,86 +144,254 @@ class StcnCrawler(BaseCrawler):
             except ValueError:
                 continue
 
-        # 只有时间的格式，返回当天
-        if re.match(r'^\d{1,2}:\d{2}$', time_str):
-            return self.today
+        # 处理月-日 时间格式（如 "06-08 19:28"）
+        month_day_match = re.match(r'^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$', time_str)
+        if month_day_match:
+            month, day = month_day_match.group(1), month_day_match.group(2)
+            current_year = datetime.now().year
+            return f"{current_year}-{month.zfill(2)}-{day.zfill(2)}"
 
-        # 回退到基类解析
-        return super()._parse_time(time_str) or self.today
+        return self.today
 
-    def _search_keyword(self, keyword: str) -> List[NewsItem]:
-        """搜索单个关键词"""
-        items = []
+    def _extract_search_results(self, page, keyword: str) -> list[dict]:
+        """从搜索页面提取结果"""
+        results = []
 
-        self.logger.info(f"开始搜索关键词: {keyword}")
+        try:
+            # 访问搜索页面
+            search_url = f"{self.base_url}/news/search.html?keyword={quote(keyword)}"
+            self.logger.info(f"[{keyword}] 访问搜索页面: {search_url}")
 
-        for page in range(1, self.max_pages_per_keyword + 1):
-            results = self._fetch_page(keyword, page)
+            page.goto(search_url, wait_until='networkidle', timeout=30000)
+            page.wait_for_load_state('domcontentloaded', timeout=10000)
 
+            # 等待搜索结果异步加载 - 先等待资讯标签被点击后的内容
+            try:
+                # 等待资讯列表出现
+                page.wait_for_selector('[data-type="news"] ul.list li', timeout=15000)
+                self.logger.info(f"[{keyword}] 搜索结果列表已加载")
+            except:
+                self.logger.warning(f"[{keyword}] 等待列表超时，尝试点击资讯标签")
+                # 尝试点击资讯标签
+                try:
+                    news_tab = page.locator('[data-type="news"]').first
+                    if news_tab:
+                        news_tab.click()
+                        time.sleep(2)
+                except:
+                    pass
+
+            time.sleep(2)  # 额外等待确保内容稳定
+
+            # 调试：保存页面截图和 HTML
+            debug_dir = f"output/logs/stcn_debug"
+            os.makedirs(debug_dir, exist_ok=True)
+            page.screenshot(path=f"{debug_dir}/{keyword}_search.png")
+            with open(f"{debug_dir}/{keyword}_search.html", "w", encoding="utf-8") as f:
+                f.write(page.content())
+            self.logger.info(f"[{keyword}] 调试文件已保存到 {debug_dir}")
+
+            # 方式1：从 window.__INITIAL_STATE__ 提取
+            initial_state = page.evaluate('''() => {
+                return window.__INITIAL_STATE__ || window.initialState || null;
+            }''')
+
+            if initial_state:
+                self.logger.info(f"[{keyword}] 找到 initialState")
+                search_data = None
+                if isinstance(initial_state, dict):
+                    if 'search' in initial_state:
+                        search_data = initial_state['search'].get('list', [])
+                    elif 'newsSearch' in initial_state:
+                        search_data = initial_state['newsSearch'].get('data', [])
+                    elif 'searchResult' in initial_state:
+                        search_data = initial_state['searchResult'].get('data', [])
+
+                if search_data and isinstance(search_data, list):
+                    self.logger.info(f"[{keyword}] 从 initialState 提取到 {len(search_data)} 条结果")
+                    for item in search_data:
+                        if not isinstance(item, dict):
+                            continue
+                        title = item.get('title', '').strip()
+                        if not title:
+                            continue
+
+                        url = item.get('url', '')
+                        if not url:
+                            continue
+                        if not url.startswith('http'):
+                            url = self.base_url + url
+
+                        results.append({
+                            'title': title,
+                            'url': url,
+                            'time': item.get('time', '') or item.get('publishTime', '') or item.get('ctime', ''),
+                        })
+
+            # 方式2：从 DOM 提取
             if not results:
-                self.logger.info(f"[{keyword}] 第{page}页无结果，停止翻页")
-                break
+                self.logger.info(f"[{keyword}] 尝试从 DOM 提取结果")
 
-            for news in results:
-                url = news['url']
+                try:
+                    # 使用 locator API 提取数据
+                    list_items = page.locator('[data-type="news"] ul.list li').all()
+                    self.logger.info(f"[{keyword}] 找到 {len(list_items)} 个列表项")
 
-                # 去重检查
-                if url in self.seen_urls:
-                    self.logger.debug(f"跳过重复: {news['title'][:30]}...")
-                    continue
-                self.seen_urls.add(url)
+                    for item in list_items:
+                        try:
+                            title_el = item.locator('.title a').first
+                            title = title_el.text_content() or ''
+                            url = title_el.get_attribute('href') or ''
 
-                # 获取详情页正文
-                self.logger.info(f"获取正文: {news['title'][:50]}...")
-                content = self._fetch_content(url)
+                            # 获取时间（最后一个 span）
+                            time_spans = item.locator('.bottom .info span').all()
+                            pub_time = ''
+                            if time_spans:
+                                pub_time = time_spans[-1].text_content() or ''
+                                pub_time = pub_time.strip()
 
-                # 创建 NewsItem
-                item = NewsItem(
-                    title=news['title'],
-                    date=self._parse_time(news['time']),
-                    url=url,
-                    source=self.source_name,
-                    source_code=self.source_code,
-                    credibility_tag=self.credibility_base,
-                    category=self._auto_classify(news['title']),
-                    content=content,
-                    raw_data={'keyword': keyword, 'search_time': news['time']},
-                )
+                            if title and url:
+                                if not url.startswith('http'):
+                                    url = self.base_url + url
+                                results.append({
+                                    'title': title.strip(),
+                                    'url': url,
+                                    'time': pub_time
+                                })
+                        except Exception as e:
+                            self.logger.debug(f"解析列表项失败: {e}")
+                            continue
 
-                # 生成 AI 摘要（如果有正文）
-                if content and len(content.strip()) > 50:
-                    self.logger.info(f"生成 AI 摘要: {news['title'][:40]}...")
-                    summary, summary_time = self.generate_summary(news['title'], content)
-                    if summary:
-                        item.summary = summary
-                        item.summary_generated_at = summary_time
-                        self.logger.info(f"✓ AI 摘要生成成功: {len(summary)} 字")
-                    else:
-                        self.logger.warning(f"✗ AI 摘要生成失败")
-                        # 使用标题作为摘要
-                        item.summary = news['title'][:150] + "..." if len(news['title']) > 150 else news['title']
-                else:
-                    # 无正文，使用标题作为摘要
-                    item.summary = news['title'][:150] + "..." if len(news['title']) > 150 else news['title']
+                except Exception as e:
+                    self.logger.error(f"[{keyword}] DOM 提取失败: {e}")
 
-                items.append(item)
+                self.logger.info(f"[{keyword}] 从 DOM 提取到 {len(results)} 条结果")
+                # 调试：打印前几条结果
+                for i, r in enumerate(results[:5]):
+                    self.logger.info(f"  [{i+1}] 标题: {r['title'][:30]}... 时间: '{r['time']}'")
 
-                # 礼貌延时
-                time.sleep(1)
+        except Exception as e:
+            self.logger.error(f"[{keyword}] 提取搜索结果失败: {e}")
 
-            # 翻页延时
+        # 过滤：关键词匹配 + 日期过滤
+        filtered_results = []
+        keyword_lower = keyword.lower()
+
+        for item in results:
+            title = item.get('title', '')
+            time_str = item.get('time', '')
+
+            # 检查关键词匹配
+            if keyword_lower not in title.lower():
+                self.logger.debug(f"[{keyword}] 过滤掉不相关结果: {title[:50]}...")
+                continue
+
+            # 检查日期是否为当天（如果 skip_date_filter=True 则跳过此检查）
+            if not self.skip_date_filter and not self._is_today(time_str):
+                self.logger.debug(f"[{keyword}] 过滤掉非当天结果: {title[:50]}... (日期: {time_str})")
+                continue
+
+            filtered_results.append(item)
+
+        filter_mode = "日期过滤已禁用" if self.skip_date_filter else f"当天: {self.today}"
+        self.logger.info(f"[{keyword}] 过滤后: {len(filtered_results)}/{len(results)} 条 ({filter_mode})")
+        return filtered_results
+
+    def _fetch_content_with_playwright(self, page, url: str) -> str:
+        """使用 Playwright 获取详情页内容"""
+        try:
+            self.logger.info(f"  访问详情页: {url[:60]}...")
+
+            page.goto(url, wait_until='networkidle', timeout=30000)
+            page.wait_for_load_state('domcontentloaded', timeout=10000)
             time.sleep(2)
 
-        self.logger.info(f"[{keyword}] 搜索完成: {len(items)} 条")
-        return items
+            # 尝试从 window.__INITIAL_STATE__ 提取
+            initial_state = page.evaluate('''() => {
+                return window.__INITIAL_STATE__ || window.initialState || null;
+            }''')
 
-    def fetch(self) -> List[NewsItem]:
-        """采集数据（多关键词搜索合并）"""
+            if initial_state:
+                try:
+                    article = None
+                    if isinstance(initial_state, dict):
+                        if 'article' in initial_state:
+                            article = initial_state['article'].get('detail', {})
+                        elif 'newsDetail' in initial_state:
+                            article = initial_state['newsDetail']
+                        elif 'detail' in initial_state:
+                            article = initial_state['detail']
+
+                    if article:
+                        content = article.get('content', '')
+                        if content:
+                            return self._clean_html_content(content)
+                except:
+                    pass
+
+            # 从 DOM 提取内容
+            content = page.evaluate('''() => {
+                const selectors = [
+                    'article',
+                    '.article-content',
+                    '.content-detail',
+                    '.news-content',
+                    '.text-content',
+                    '#content',
+                    '.main-content',
+                    '.detail-content',
+                ];
+
+                for (const selector of selectors) {
+                    const el = document.querySelector(selector);
+                    if (el && el.textContent.length > 100) {
+                        return el.innerHTML;
+                    }
+                }
+
+                // 备选：提取所有段落
+                const paragraphs = document.querySelectorAll('p');
+                const text = Array.from(paragraphs)
+                    .map(p => p.textContent.trim())
+                    .filter(t => t.length > 20)
+                    .join('\\n');
+                return text;
+            }''')
+
+            if content:
+                return self._clean_html_content(content)
+
+            return ""
+
+        except Exception as e:
+            self.logger.error(f"  获取详情页失败: {url} - {e}")
+            return ""
+
+    def _clean_html_content(self, html: str) -> str:
+        """清理HTML内容"""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # 移除script和style
+        for script in soup(['script', 'style']):
+            script.decompose()
+
+        # 获取文本
+        text = soup.get_text(separator='\n', strip=True)
+
+        # 清理多余空行
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        return '\n'.join(lines)
+
+    def fetch(self) -> list[NewsItem]:
+        """采集数据"""
+        from playwright.sync_api import sync_playwright
+
         all_items = []
 
-        self.logger.info(f"开始采集 - 关键词: {self.keywords}, 当天: {self.today}")
+        self.logger.info(f"开始采集 - 关键词: {self.keywords}, {self.logger_info}")
 
-        # 创建批次目录（用于后续统一保存）
+        # 创建批次目录
         now = datetime.now()
         date_dir = now.strftime('%Y/%m/%d')
         batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
@@ -425,14 +399,76 @@ class StcnCrawler(BaseCrawler):
         os.makedirs(self._batch_dir, exist_ok=True)
         self.logger.info(f"批次目录: {self._batch_dir}")
 
-        # 逐个关键词搜索
-        for keyword in self.keywords:
-            items = self._search_keyword(keyword)
-            all_items.extend(items)
-            self.logger.info(f"当前总计: {len(all_items)} 条")
-            time.sleep(3)  # 关键词之间延时
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                viewport={'width': 1280, 'height': 800},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
 
-        self.logger.info(f"采集完成: 共 {len(all_items)} 条（去重后）")
+            # 搜索页面
+            search_page = context.new_page()
+
+            for keyword in self.keywords:
+                self.logger.info(f"开始搜索关键词: {keyword}")
+
+                # 提取搜索结果
+                results = self._extract_search_results(search_page, keyword)
+                self.logger.info(f"[{keyword}] 找到 {len(results)} 条有效结果")
+
+                # 限制数量
+                results = results[:self.max_items_per_keyword]
+
+                # 创建详情页标签页
+                detail_page = context.new_page()
+
+                for idx, news in enumerate(results, 1):
+                    url = news['url']
+
+                    # 去重检查
+                    if url in self.seen_urls:
+                        self.logger.info(f"[{idx}/{len(results)}] 跳过重复: {news['title'][:50]}...")
+                        continue
+                    self.seen_urls.add(url)
+
+                    self.logger.info(f"[{idx}/{len(results)}] 处理: {news['title'][:50]}...")
+
+                    # 获取正文
+                    content = self._fetch_content_with_playwright(detail_page, url)
+
+                    # 创建 NewsItem
+                    item = NewsItem(
+                        title=news['title'],
+                        date=self._parse_time(news['time']),
+                        url=url,
+                        source=self.source_name,
+                        source_code=self.source_code,
+                        credibility_tag=self.credibility_base,
+                        category=self._auto_classify(news['title']),
+                        summary=news['title'][:150] if len(news['title']) > 150 else news['title'],
+                        content=content,
+                        raw_data={'keyword': keyword, 'search_time': news['time']},
+                    )
+
+                    # 生成 AI 摘要（如果有正文）
+                    if content and len(content.strip()) > 50:
+                        self.logger.info(f"  生成 AI 摘要...")
+                        ai_summary, summary_time = self.generate_summary(news['title'], content)
+                        if ai_summary:
+                            item.summary = ai_summary
+                            item.summary_generated_at = summary_time
+                            self.logger.info(f"  ✓ 摘要生成成功")
+
+                    all_items.append(item)
+                    time.sleep(1)
+
+                detail_page.close()
+                time.sleep(2)
+
+            search_page.close()
+            browser.close()
+
+        self.logger.info(f"采集完成: 共 {len(all_items)} 条")
         return all_items
 
 
@@ -441,8 +477,10 @@ def main():
     import os
 
     enable_summary = os.getenv('STCN_ENABLE_SUMMARY', 'true').lower() == 'true'
-    test_date = os.getenv('STCN_TEST_DATE')  # 测试日期，如 2025-06-08
-    skip_date_filter = os.getenv('STCN_SKIP_DATE_FILTER', 'false').lower() == 'true'  # 禁用日期过滤
+    test_date = os.getenv('STCN_TEST_DATE')
+    #skip_date_filter = os.getenv('STCN_SKIP_DATE_FILTER', 'false').lower() == 'true'
+    skip_date_filter = True  # 默认跳过日期过滤，采集所有日期
+
 
     crawler = StcnCrawler(
         enable_summary=enable_summary,
@@ -466,18 +504,9 @@ def main():
         print(f"{i}. [{item.category}] {item.title}")
         print(f"   时间: {item.date}")
         print(f"   链接: {item.url}")
-        print(f"   来源关键词: {item.raw_data.get('keyword', 'N/A')}")
 
         if item.summary:
             print(f"   AI摘要: {item.summary}")
-
-        if item.content:
-            preview = item.content[:200].replace('\n', ' ') if len(item.content) > 200 else item.content
-            print(f"   内容预览: {preview}...")
-
-    print(f"\n{'='*70}")
-    print("数据已保存到批次目录")
-    print("="*70)
 
 
 if __name__ == "__main__":
