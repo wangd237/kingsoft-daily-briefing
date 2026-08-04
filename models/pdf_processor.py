@@ -81,9 +81,14 @@ class PDFProcessor:
 
         return None
 
-    def download_pdf(self, pdf_url: str, stock_code: str = "688111") -> Optional[Tuple[str, str]]:
+    def download_pdf(self, pdf_url: str, stock_code: str = "688111", extra_headers: dict = None) -> Optional[Tuple[str, str]]:
         """
         下载 PDF 文件
+
+        Args:
+            pdf_url: PDF 下载链接
+            stock_code: 股票代码（用于命名）
+            extra_headers: 额外的请求头（如 Referer，用于绕过防盗链）
 
         Returns:
             (本地文件路径, 文件ID)，失败返回 None
@@ -108,8 +113,12 @@ class PDFProcessor:
             # 下载
             logger.info(f"下载 PDF: {pdf_url}")
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/pdf,*/*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
             }
+            if extra_headers:
+                headers.update(extra_headers)
             response = requests.get(pdf_url, headers=headers, timeout=30)
             response.raise_for_status()
 
