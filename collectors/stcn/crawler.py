@@ -31,7 +31,7 @@ class StcnCrawler(BaseCrawler):
     source_code = "stcn"
     credibility_base = "【媒体报道】"
 
-    def __init__(self, enable_summary: bool = True, test_date: str | None = None, skip_date_filter: bool = True):
+    def __init__(self, enable_summary: bool = True, test_date: str | None = None, skip_date_filter: bool = False):
         # 从配置读取参数
         config = COLLECTORS.get('stcn', {})
         self.keywords = config.get('keywords', ['金山办公'])
@@ -478,8 +478,7 @@ def main():
 
     enable_summary = os.getenv('STCN_ENABLE_SUMMARY', 'true').lower() == 'true'
     test_date = os.getenv('STCN_TEST_DATE')
-    #skip_date_filter = os.getenv('STCN_SKIP_DATE_FILTER', 'false').lower() == 'true'
-    skip_date_filter = True  # 默认跳过日期过滤，采集所有日期
+    skip_date_filter = os.getenv('STCN_SKIP_DATE_FILTER', 'false').lower() == 'true'
 
 
     crawler = StcnCrawler(
