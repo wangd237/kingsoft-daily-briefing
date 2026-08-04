@@ -41,8 +41,8 @@ class NewsItem:
     category: str = ""
 
     # 时间
-    publish_time: datetime = None
-    summary_generated_at: datetime = None  # 摘要生成时间
+    publish_time: Optional[datetime] = None
+    summary_generated_at: Optional[datetime] = None  # 摘要生成时间
 
     # 内容
     summary: str = ""
