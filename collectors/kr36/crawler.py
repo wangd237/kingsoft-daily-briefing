@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 36氪采集器
-使用 requests + API/页面解析
+使用 Playwright 模拟浏览器获取搜索结果
 支持多关键词搜索、详情页正文抓取、AI 摘要
 """
 import sys
@@ -9,12 +9,10 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-import requests
 import re
-import json
 from datetime import datetime
-from typing import List, Dict, Set
 from pathlib import Path
+from urllib.parse import quote
 import time
 import os
 
@@ -46,18 +44,9 @@ class Kr36Crawler(BaseCrawler):
         super().__init__(enable_summary=enable_summary)
 
         self.base_url = "https://36kr.com"
-        self.api_base = "https://gateway.36kr.com"
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-            'Origin': 'https://36kr.com',
-            'Referer': 'https://36kr.com/',
-        })
 
         # 已抓取的URL集合（用于去重）
-        self.seen_urls: Set[str] = set()
+        self.seen_urls: set[str] = set()
 
     def _auto_classify(self, title: str) -> str:
         """自动分类"""
@@ -70,111 +59,237 @@ class Kr36Crawler(BaseCrawler):
             return max(scores, key=scores.get)
         return "产品动态"
 
-    def _fetch_search_api(self, keyword: str) -> List[Dict]:
-        """使用搜索API获取结果"""
+    def _parse_time(self, time_str: str) -> str:
+        """解析时间字符串"""
+        if not time_str:
+            return datetime.now().strftime('%Y-%m-%d')
+
+        # 时间戳（毫秒）
+        if isinstance(time_str, (int, float)) or (isinstance(time_str, str) and time_str.isdigit()):
+            try:
+                timestamp = int(time_str) / 1000  # 毫秒转秒
+                dt = datetime.fromtimestamp(timestamp)
+                return dt.strftime('%Y-%m-%d')
+            except:
+                pass
+
+        # ISO格式
+        try:
+            dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+            return dt.strftime('%Y-%m-%d')
+        except:
+            pass
+
+        # 尝试正则匹配日期
+        match = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', str(time_str))
+        if match:
+            return f"{match.group(1)}-{match.group(2).zfill(2)}-{match.group(3).zfill(2)}"
+
+        return datetime.now().strftime('%Y-%m-%d')
+
+    def _extract_search_results(self, page, keyword: str) -> list[dict]:
+        """从搜索页面提取结果"""
         results = []
 
         try:
-            # 36氪搜索API
-            url = f"{self.api_base}/api/mis/open/search/articles"
+            # 访问搜索页面
+            search_url = f"{self.base_url}/search/articles/{quote(keyword)}"
+            self.logger.info(f"[{keyword}] 访问搜索页面: {search_url}")
 
-            payload = {
-                "keyword": keyword,
-                "page": 1,
-                "pageSize": self.max_items_per_keyword * 2,  # 多取一些用于过滤
-                "sort": "published_at",  # 按发布时间排序
-                "order": "desc"
-            }
+            page.goto(search_url, wait_until='networkidle', timeout=30000)
 
-            self.logger.info(f"[{keyword}] 请求搜索API...")
+            # 等待搜索结果加载
+            # 先等待页面基本结构
+            page.wait_for_load_state('domcontentloaded', timeout=10000)
 
-            resp = self.session.post(url, json=payload, timeout=30)
+            # 等待搜索结果容器出现（给页面一些时间加载数据）
+            time.sleep(3)
 
-            if resp.status_code != 200:
-                self.logger.error(f"[{keyword}] API请求失败: HTTP {resp.status_code}")
-                return results
+            # 尝试多种方式提取搜索结果
+            # 方式1：从 window.__INITIAL_STATE__ 提取
+            initial_state = page.evaluate('''() => {
+                return window.__INITIAL_STATE__ || window.initialState || null;
+            }''')
 
-            data = resp.json()
+            if initial_state:
+                self.logger.info(f"[{keyword}] 找到 initialState")
+                # 尝试多种可能的路径
+                search_data = None
+                if isinstance(initial_state, dict):
+                    if 'search' in initial_state:
+                        search_data = initial_state['search'].get('searchResult', {}).get('data', [])
+                    elif 'articleSearch' in initial_state:
+                        search_data = initial_state['articleSearch'].get('data', [])
+                    elif 'searchResult' in initial_state:
+                        search_data = initial_state['searchResult'].get('data', [])
 
-            if data.get('code') != 0:
-                self.logger.error(f"[{keyword}] API返回错误: {data.get('msg', 'Unknown')}")
-                return results
+                if search_data and isinstance(search_data, list):
+                    self.logger.info(f"[{keyword}] 从 initialState 提取到 {len(search_data)} 条结果")
+                    for item in search_data:
+                        if not isinstance(item, dict):
+                            continue
+                        title = item.get('title', '').strip()
+                        if not title:
+                            continue
 
-            items = data.get('data', {}).get('items', [])
-            self.logger.info(f"[{keyword}] API返回 {len(items)} 条结果")
+                        url = item.get('url', '')
+                        if not url:
+                            item_id = item.get('id', '') or item.get('itemId', '')
+                            if item_id:
+                                url = f"{self.base_url}/p/{item_id}"
+                        elif not url.startswith('http'):
+                            url = f"{self.base_url}{url}"
 
-            for item in items:
-                title = item.get('title', '').strip()
-                summary = item.get('summary', '').strip()
-                url = item.get('url', '')
-                publish_time = item.get('published_at', '')
+                        results.append({
+                            'title': title,
+                            'url': url,
+                            'summary': item.get('summary', '').strip(),
+                            'time': item.get('published_at', '') or item.get('publishTime', ''),
+                            'item_id': item.get('id', '') or item.get('itemId', ''),
+                        })
 
-                if not title or not url:
-                    continue
+            # 方式2：如果 initialState 没有，尝试从 DOM 提取
+            if not results:
+                self.logger.info(f"[{keyword}] 尝试从 DOM 提取结果")
 
-                # 补全URL
-                if not url.startswith('http'):
-                    url = f"{self.base_url}/p/{url}" if url.isdigit() else f"{self.base_url}{url}"
-
-                results.append({
-                    'title': title,
-                    'url': url,
-                    'summary': summary,
-                    'time': publish_time,
-                    'item_id': item.get('id', ''),
-                })
-
-        except Exception as e:
-            self.logger.error(f"[{keyword}] API请求异常: {e}")
-
-        return results
-
-    def _fetch_content(self, url: str) -> str:
-        """获取详情页正文内容"""
-        try:
-            resp = self.session.get(url, timeout=30)
-            resp.encoding = 'utf-8'
-
-            if resp.status_code != 200:
-                self.logger.warning(f"详情页请求失败: {url} (HTTP {resp.status_code})")
-                return ""
-
-            html = resp.text
-
-            # 尝试从 window.initialState 提取
-            match = re.search(r'window\.initialState\s*=\s*({.+?});', html, re.DOTALL)
-            if match:
+                # 等待搜索结果元素出现
                 try:
-                    data = json.loads(match.group(1))
-                    article = data.get('article', {}).get('articleDetail', {}).get('articleDetailData', {}).get('data', {})
-                    content = article.get('content', '')
-                    if content:
-                        return self._clean_html_content(content)
+                    page.wait_for_selector('.search-result-list, .article-list, .kr-article-list, [class*="article"]', timeout=10000)
                 except:
                     pass
 
-            # 备用：使用 BeautifulSoup 解析
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, 'html.parser')
+                # 提取 DOM 数据
+                dom_results = page.evaluate('''() => {
+                    const results = [];
 
-            content_selectors = [
-                '.article-content',
-                '.article-detail-content',
-                '.content-detail',
-                'article',
-            ]
+                    // 尝试多种可能的选择器
+                    const selectors = [
+                        '.search-result-list .article-item',
+                        '.article-list .article-item',
+                        '.kr-article-list .article-item',
+                        '[class*="search"] [class*="article"]',
+                        '[class*="article-list"] > div',
+                        '.article-card',
+                    ];
 
-            for selector in content_selectors:
-                element = soup.select_one(selector)
-                if element:
-                    content = element.get_text(separator='\n', strip=True)
-                    if len(content) > 100:
-                        return content
+                    for (const selector of selectors) {
+                        const items = document.querySelectorAll(selector);
+                        if (items.length > 0) {
+                            items.forEach(item => {
+                                const titleEl = item.querySelector('h1, h2, h3, h4, .title, [class*="title"]');
+                                const linkEl = item.querySelector('a[href*="/p/"]') || item.querySelector('a');
+                                const summaryEl = item.querySelector('.summary, .description, [class*="summary"], [class*="desc"]');
+                                const timeEl = item.querySelector('.time, .date, [class*="time"], [class*="date"]');
+
+                                if (titleEl && linkEl) {
+                                    results.push({
+                                        title: titleEl.textContent?.trim() || '',
+                                        url: linkEl.href || '',
+                                        summary: summaryEl?.textContent?.trim() || '',
+                                        time: timeEl?.textContent?.trim() || '',
+                                        item_id: '',
+                                    });
+                                }
+                            });
+                            if (results.length > 0) break;
+                        }
+                    }
+
+                    return results;
+                }''')
+
+                if dom_results and len(dom_results) > 0:
+                    self.logger.info(f"[{keyword}] 从 DOM 提取到 {len(dom_results)} 条结果")
+                    results = dom_results
+
+        except Exception as e:
+            self.logger.error(f"[{keyword}] 提取搜索结果失败: {e}")
+
+        # 获取当前日期
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        # 过滤：只保留标题中包含搜索关键词且日期为当天的结果
+        filtered_results = []
+        keyword_lower = keyword.lower()
+        for item in results:
+            title = item.get('title', '')
+            time_str = item.get('time', '')
+
+            # 检查关键词匹配
+            if keyword_lower not in title.lower():
+                self.logger.debug(f"[{keyword}] 过滤掉不相关结果: {title[:50]}...")
+                continue
+
+            # 检查日期是否为当天
+            item_date = self._parse_time(time_str)
+            if item_date != today:
+                self.logger.debug(f"[{keyword}] 过滤掉非当天结果: {title[:50]}... (日期: {item_date})")
+                continue
+
+            filtered_results.append(item)
+
+        self.logger.info(f"[{keyword}] 过滤后: {len(filtered_results)}/{len(results)} 条 (当天日期: {today})")
+        return filtered_results
+
+    def _fetch_content_with_playwright(self, page, url: str) -> str:
+        """使用 Playwright 获取详情页内容"""
+        try:
+            self.logger.info(f"  访问详情页: {url[:60]}...")
+
+            page.goto(url, wait_until='networkidle', timeout=30000)
+            page.wait_for_load_state('domcontentloaded', timeout=10000)
+            time.sleep(2)  # 等待内容加载
+
+            # 尝试从 window.__INITIAL_STATE__ 提取
+            initial_state = page.evaluate('''() => {
+                return window.__INITIAL_STATE__ || window.initialState || null;
+            }''')
+
+            if initial_state:
+                try:
+                    # 尝试多种可能的路径
+                    article = None
+                    if isinstance(initial_state, dict):
+                        if 'article' in initial_state:
+                            article = initial_state['article'].get('articleDetail', {}).get('articleDetailData', {}).get('data', {})
+                        elif 'articleDetail' in initial_state:
+                            article = initial_state['articleDetail']
+
+                    if article:
+                        content = article.get('content', '')
+                        if content:
+                            return self._clean_html_content(content)
+                except:
+                    pass
+
+            # 从 DOM 提取内容
+            content = page.evaluate('''() => {
+                const selectors = [
+                    '.article-content',
+                    '.article-detail-content',
+                    '.content-detail',
+                    '[class*="article-content"]',
+                    '[class*="article-detail"]',
+                    'article',
+                    '.kr-article-body',
+                ];
+
+                for (const selector of selectors) {
+                    const el = document.querySelector(selector);
+                    if (el && el.textContent.length > 100) {
+                        return el.innerHTML;
+                    }
+                }
+                return '';
+            }''')
+
+            if content:
+                return self._clean_html_content(content)
 
             return ""
 
         except Exception as e:
-            self.logger.error(f"获取详情页失败: {url} - {e}")
+            self.logger.error(f"  获取详情页失败: {url} - {e}")
             return ""
 
     def _clean_html_content(self, html: str) -> str:
@@ -193,77 +308,10 @@ class Kr36Crawler(BaseCrawler):
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         return '\n'.join(lines)
 
-    def _parse_time(self, time_str: str) -> str:
-        """解析时间字符串"""
-        if not time_str:
-            return datetime.now().strftime('%Y-%m-%d')
-
-        # 时间戳（毫秒）
-        if time_str.isdigit():
-            try:
-                timestamp = int(time_str) / 1000  # 毫秒转秒
-                dt = datetime.fromtimestamp(timestamp)
-                return dt.strftime('%Y-%m-%d')
-            except:
-                pass
-
-        # ISO格式
-        try:
-            dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
-            return dt.strftime('%Y-%m-%d')
-        except:
-            pass
-
-        return datetime.now().strftime('%Y-%m-%d')
-
-    def _search_keyword(self, keyword: str) -> List[NewsItem]:
-        """搜索单个关键词"""
-        items = []
-
-        self.logger.info(f"开始搜索关键词: {keyword}")
-
-        results = self._fetch_search_api(keyword)
-
-        for news in results[:self.max_items_per_keyword]:
-            url = news['url']
-
-            # 去重检查
-            if url in self.seen_urls:
-                continue
-            self.seen_urls.add(url)
-
-            self.logger.info(f"获取正文: {news['title'][:50]}...")
-            content = self._fetch_content(url)
-
-            # 创建 NewsItem
-            item = NewsItem(
-                title=news['title'],
-                date=self._parse_time(news['time']),
-                url=url,
-                source=self.source_name,
-                source_code=self.source_code,
-                credibility_tag=self.credibility_base,
-                category=self._auto_classify(news['title']),
-                summary=news['summary'] or news['title'][:150],
-                content=content,
-                raw_data={'keyword': keyword},
-            )
-
-            # 生成 AI 摘要（如果有正文）
-            if content and len(content.strip()) > 50:
-                ai_summary, summary_time = self.generate_summary(news['title'], content)
-                if ai_summary:
-                    item.summary = ai_summary
-                    item.summary_generated_at = summary_time
-
-            items.append(item)
-            time.sleep(1)
-
-        self.logger.info(f"[{keyword}] 搜索完成: {len(items)} 条")
-        return items
-
-    def fetch(self) -> List[NewsItem]:
+    def fetch(self) -> list[NewsItem]:
         """采集数据"""
+        from playwright.sync_api import sync_playwright
+
         all_items = []
 
         self.logger.info(f"开始采集36氪 - 关键词: {self.keywords}")
@@ -275,10 +323,74 @@ class Kr36Crawler(BaseCrawler):
         self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
         os.makedirs(self._batch_dir, exist_ok=True)
 
-        for keyword in self.keywords:
-            items = self._search_keyword(keyword)
-            all_items.extend(items)
-            time.sleep(2)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                viewport={'width': 1280, 'height': 800},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+
+            # 搜索页面
+            search_page = context.new_page()
+
+            for keyword in self.keywords:
+                self.logger.info(f"开始搜索关键词: {keyword}")
+
+                # 提取搜索结果
+                results = self._extract_search_results(search_page, keyword)
+                self.logger.info(f"[{keyword}] 找到 {len(results)} 条结果")
+
+                # 限制数量
+                results = results[:self.max_items_per_keyword]
+
+                # 创建详情页标签页
+                detail_page = context.new_page()
+
+                for idx, news in enumerate(results, 1):
+                    url = news['url']
+
+                    # 去重检查
+                    if url in self.seen_urls:
+                        self.logger.info(f"[{idx}/{len(results)}] 跳过重复: {news['title'][:50]}...")
+                        continue
+                    self.seen_urls.add(url)
+
+                    self.logger.info(f"[{idx}/{len(results)}] 处理: {news['title'][:50]}...")
+
+                    # 获取正文
+                    content = self._fetch_content_with_playwright(detail_page, url)
+
+                    # 创建 NewsItem
+                    item = NewsItem(
+                        title=news['title'],
+                        date=self._parse_time(news['time']),
+                        url=url,
+                        source=self.source_name,
+                        source_code=self.source_code,
+                        credibility_tag=self.credibility_base,
+                        category=self._auto_classify(news['title']),
+                        summary=news['summary'] or news['title'][:150],
+                        content=content,
+                        raw_data={'keyword': keyword},
+                    )
+
+                    # 生成 AI 摘要（如果有正文）
+                    if content and len(content.strip()) > 50:
+                        self.logger.info(f"  生成 AI 摘要...")
+                        ai_summary, summary_time = self.generate_summary(news['title'], content)
+                        if ai_summary:
+                            item.summary = ai_summary
+                            item.summary_generated_at = summary_time
+                            self.logger.info(f"  ✓ 摘要生成成功")
+
+                    all_items.append(item)
+                    time.sleep(1)
+
+                detail_page.close()
+                time.sleep(2)
+
+            search_page.close()
+            browser.close()
 
         self.logger.info(f"采集完成: 共 {len(all_items)} 条")
         return all_items
