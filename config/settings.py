@@ -88,7 +88,28 @@ COLLECTORS = {
         ],
         'credibility': '【官方资讯】',
         'enable_summary': False,
-    }
+    },
+    'stcn': {
+        'enabled': True,
+        'name': '证券时报e公司',
+        'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
+    'kr36': {
+        'enabled': True,
+        'name': '36氪',
+        'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
+    'yicai': {
+        'enabled': True,
+        'name': '第一财经',
+        'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
 }
 
 # 分类关键词
