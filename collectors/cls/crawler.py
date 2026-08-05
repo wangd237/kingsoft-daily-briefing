@@ -172,9 +172,9 @@ class CLSCrawler(BaseCrawler):
         results = []
 
         try:
-            # 访问搜索页面 - 使用 type=all 参数，然后点击资讯标签
-            search_url = f"{self.base_url}/searchPage?keyword={keyword}&type=all"
-            self.logger.info(f"[{keyword}] 访问搜索页: {search_url}")
+            # 直接访问电报搜索页面
+            search_url = f"{self.base_url}/searchPage?keyword={keyword}&type=telegram"
+            self.logger.info(f"[{keyword}] 访问电报搜索页: {search_url}")
 
             page.goto(search_url, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)
@@ -189,207 +189,71 @@ class CLSCrawler(BaseCrawler):
                 page.screenshot(path=f"output/logs/cls_{keyword}_captcha.png")
                 return results
 
-            # 财联社搜索页面默认显示综合，需要点击"资讯"标签获取文章列表
-            tab_clicked = False
-            try:
-                # 方法1: 直接通过 locator 和 click 尝试
-                for tab_text in ['资讯', '文章']:
-                    try:
-                        # 使用 page.get_by_text 更可靠
-                        tab = page.get_by_text(tab_text, exact=False).filter(has_text=re.compile(f'^{tab_text}'))
-                        if tab.count() > 0:
-                            self.logger.info(f"[{keyword}] 找到{tab_text}标签，准备点击")
-                            tab.first.click()
-                            tab_clicked = True
-                            time.sleep(3)
-                            break
-                    except Exception:
-                        continue
-
-                # 方法2: 如果方法1失败，尝试直接执行 JavaScript 点击
-                if not tab_clicked:
-                    self.logger.info(f"[{keyword}] 尝试通过 JavaScript 点击资讯标签")
-                    page.evaluate('''() => {
-                        // 尝试多种方式找到资讯标签
-                        const tabs = document.querySelectorAll('.search-tab, .tab-item, .nav-item, [class*="tab"]');
-                        for (const tab of tabs) {
-                            if (tab.textContent.includes('资讯') || tab.textContent.includes('文章')) {
-                                tab.click();
-                                return true;
-                            }
-                        }
-                        return false;
-                    }''')
-                    time.sleep(3)
-
-            except Exception:
-                self.logger.debug(f"[{keyword}] 点击标签过程出错")
-
-            # 等待搜索结果加载
-            try:
-                page.wait_for_selector('.search-result-list .result-item, .content_list .list_item, .search-article-item, .article-list .item, [class*="search"] [class*="item"]', timeout=15000)
-                self.logger.info(f"[{keyword}] 搜索结果列表已加载")
-            except:
-                self.logger.warning(f"[{keyword}] 等待列表超时，尝试备用方案")
-                # 备用方案：直接访问 type=news 的URL
-                try:
-                    news_url = f"{self.base_url}/searchPage?keyword={keyword}&type=news"
-                    self.logger.info(f"[{keyword}] 尝试直接访问资讯页面: {news_url}")
-                    page.goto(news_url, wait_until="networkidle", timeout=30000)
-                    page.wait_for_timeout(3000)
-                except Exception:
-                    pass
-
             # 截图调试
             page.screenshot(path=f"output/logs/cls_{keyword}_search.png")
 
-            # 提取搜索结果 - 财联社区分【电报】和【文章】，我们主要采集深度文章
-            # 方式1：从 window.__INITIAL_STATE__ 提取
-            initial_state = page.evaluate('''() => {
-                return window.__INITIAL_STATE__ || window.initialState || null;
+            # 等待电报列表加载
+            try:
+                page.wait_for_selector('.search-content', timeout=10000)
+                self.logger.info(f"[{keyword}] 电报列表已加载")
+            except Exception as e:
+                self.logger.warning(f"[{keyword}] 等待列表超时: {e}")
+
+            # 使用 JavaScript 直接提取所有电报数据
+            telegraph_data = page.evaluate('''() => {
+                const items = [];
+                const contentDivs = document.querySelectorAll('.search-content');
+                contentDivs.forEach(div => {
+                    try {
+                        const content = div.textContent?.trim() || '';
+                        if (!content) return;
+
+                        // 获取链接
+                        const link = div.closest('a');
+                        const url = link?.getAttribute('href') || '';
+
+                        // 获取时间 - 找父级div的第一个子div（时间div）
+                        let time = '';
+                        const parentDiv = link?.parentElement?.parentElement;
+                        if (parentDiv) {
+                            const timeDiv = parentDiv.querySelector('div:first-child');
+                            time = timeDiv?.textContent?.trim() || '';
+                        }
+
+                        items.push({
+                            content: content,
+                            url: url,
+                            time: time
+                        });
+                    } catch (e) {}
+                });
+                return items;
             }''')
 
-            if initial_state:
-                try:
-                    self.logger.info(f"[{keyword}] 找到 initialState")
-                    search_data = None
-                    if isinstance(initial_state, dict):
-                        # 财联社可能的数据结构
-                        if 'search' in initial_state:
-                            search_data = initial_state['search'].get('list', [])
-                        elif 'searchPage' in initial_state:
-                            search_data = initial_state['searchPage'].get('articleList', [])
-                        elif 'articleList' in initial_state:
-                            search_data = initial_state['articleList']
+            if telegraph_data and len(telegraph_data) > 0:
+                self.logger.info(f"[{keyword}] 提取到 {len(telegraph_data)} 条电报")
+                for item in telegraph_data:
+                    content = item.get('content', '').strip()
+                    if not content:
+                        continue
 
-                    if search_data and isinstance(search_data, list):
-                        self.logger.info(f"[{keyword}] 从 initialState 提取到 {len(search_data)} 条结果")
-                        for item in search_data:
-                            if not isinstance(item, dict):
-                                continue
-                            title = item.get('title', '').strip()
-                            if not title:
-                                continue
+                    title = content[:60] + "..." if len(content) > 60 else content
+                    url = item.get('url', '')
+                    if url and not url.startswith('http'):
+                        url = f"{self.base_url}{url}"
+                    if not url:
+                        url = search_url
 
-                            url = item.get('shareUrl', '') or item.get('url', '')
-                            if not url:
-                                item_id = item.get('id', '') or item.get('articleId', '')
-                                if item_id:
-                                    url = f"{self.base_url}/detail/{item_id}"
-                            elif not url.startswith('http'):
-                                url = f"{self.base_url}{url}"
+                    pub_time = item.get('time', '')
 
-                            if title and url:
-                                results.append({
-                                    'title': title.strip(),
-                                    'url': url,
-                                    'time': item.get('time', '') or item.get('ctime', '') or item.get('publishTime', ''),
-                                    'summary': item.get('brief', '') or item.get('summary', ''),
-                                })
-                except Exception as e:
-                    self.logger.debug(f"[{keyword}] 解析 initialState 失败: {e}")
-
-            # 方式2：从 DOM 提取（如果 initialState 没有数据）
-            if not results:
-                self.logger.info(f"[{keyword}] 尝试从 DOM 提取结果")
-
-                try:
-                    # 财联社搜索结果结构 - 使用更广泛的选择器
-                    # 先尝试滚动页面加载更多内容
-                    page.evaluate('''() => {
-                        window.scrollTo(0, 500);
-                    }''')
-                    time.sleep(1)
-
-                    # 多种可能的选择器组合
-                    selectors = [
-                        '.search-result-list .result-item',
-                        '.content_list .list_item',
-                        '.search-article-item',
-                        '.article-list .item',
-                        '.search-result .item',
-                        '[class*="search"] [class*="item"]',
-                        '.list-item',
-                        '.search-item',
-                    ]
-
-                    list_items = []
-                    for selector in selectors:
-                        try:
-                            items = page.locator(selector).all()
-                            if items:
-                                self.logger.info(f"[{keyword}] 使用选择器 '{selector}' 找到 {len(items)} 个列表项")
-                                list_items = items
-                                break
-                        except:
-                            continue
-
-                    if not list_items:
-                        # 最后尝试：直接获取所有包含链接的 div
-                        list_items = page.locator('div:has(> a[href*="/detail/"])').all()
-                        self.logger.info(f"[{keyword}] 使用备用选择器找到 {len(list_items)} 个列表项")
-
-                    self.logger.info(f"[{keyword}] 共找到 {len(list_items)} 个列表项")
-
-                    for item in list_items:
-                        try:
-                            # 提取标题 - 尝试多种方式
-                            title = ''
-                            for title_selector in ['.title', 'h3', 'h4', '.article-title', '.item-title', 'a']:
-                                try:
-                                    title_el = item.locator(title_selector).first
-                                    title = title_el.text_content(timeout=100) or ''
-                                    if title.strip():
-                                        break
-                                except:
-                                    continue
-
-                            # 提取链接
-                            url = ''
-                            try:
-                                link_el = item.locator('a').first
-                                url = link_el.get_attribute('href') or ''
-                            except:
-                                pass
-
-                            if url and not url.startswith('http'):
-                                url = f"{self.base_url}{url}"
-
-                            # 提取时间
-                            pub_time = ''
-                            for time_selector in ['.time', '.date', '.publish-time', '[class*="time"]', '[class*="date"]']:
-                                try:
-                                    time_el = item.locator(time_selector).first
-                                    pub_time = time_el.text_content(timeout=100) or ''
-                                    if pub_time.strip():
-                                        break
-                                except:
-                                    continue
-
-                            # 提取摘要
-                            summary = ''
-                            for summary_selector in ['.summary', '.brief', '.desc', '.content', 'p']:
-                                try:
-                                    summary_el = item.locator(summary_selector).first
-                                    summary = summary_el.text_content(timeout=100) or ''
-                                    if summary.strip():
-                                        break
-                                except:
-                                    continue
-
-                            if title.strip() and url:
-                                results.append({
-                                    'title': title.strip(),
-                                    'url': url,
-                                    'time': pub_time.strip(),
-                                    'summary': summary.strip(),
-                                })
-                        except Exception as item_e:
-                            self.logger.debug(f"解析列表项失败: {item_e}")
-                            continue
-
-                except Exception as e:
-                    self.logger.error(f"[{keyword}] DOM 提取失败: {e}")
+                    results.append({
+                        'title': title.strip(),
+                        'url': url,
+                        'time': pub_time,
+                        'summary': content.strip(),
+                        'content': content.strip(),
+                        'is_telegraph': True,
+                    })
 
             self.logger.info(f"[{keyword}] 成功提取 {len(results)} 条")
 
@@ -513,10 +377,10 @@ class CLSCrawler(BaseCrawler):
             return '\n'.join(lines)
 
     def fetch(self) -> List[NewsItem]:
-        """采集数据"""
+        """采集数据 - 只采集电报内容"""
         all_items = []
 
-        self.logger.info(f"开始采集财联社 - 关键词: {self.keywords}")
+        self.logger.info(f"开始采集财联社电报 - 关键词: {self.keywords}")
         self.logger.info(self.logger_info)  # 打印时间窗口信息
 
         # 创建批次目录
@@ -557,8 +421,12 @@ class CLSCrawler(BaseCrawler):
                             continue
                         self.seen_urls.add(url)
 
-                        self.logger.info(f"获取正文: {news['title'][:50]}...")
-                        content = self._fetch_content(page, url)
+                        # 电报内容已在搜索结果中获取，不需要再进详情页
+                        content = news.get('content', '')
+                        if not content:
+                            # 如果没有内容，尝试获取详情页
+                            self.logger.info(f"获取详情页: {news['title'][:50]}...")
+                            content = self._fetch_content(page, url)
 
                         # 创建 NewsItem
                         item = NewsItem(
@@ -571,18 +439,18 @@ class CLSCrawler(BaseCrawler):
                             category=self._auto_classify(news['title']),
                             summary=news.get('summary', '') or news['title'][:150],
                             content=content,
-                            raw_data={'keyword': keyword},
+                            raw_data={'keyword': keyword, 'is_telegraph': news.get('is_telegraph', True)},
                         )
 
-                        # AI 摘要
-                        if content and len(content.strip()) > 50:
+                        # AI 摘要（如果内容足够长）
+                        if content and len(content.strip()) > 100:
                             ai_summary, summary_time = self.generate_summary(news['title'], content)
                             if ai_summary:
                                 item.summary = ai_summary
                                 item.summary_generated_at = summary_time
 
                         all_items.append(item)
-                        time.sleep(1)
+                        time.sleep(0.5)
 
                     time.sleep(2)
 
@@ -599,7 +467,7 @@ def main():
     import os
 
     # 支持环境变量配置时间窗口（默认24小时）
-    hours_window = int(os.getenv('CLS_HOURS_WINDOW', '600'))
+    hours_window = int(os.getenv('CLS_HOURS_WINDOW', '1600'))
 
     crawler = CLSCrawler(hours_window=hours_window)
     items = crawler.run()
