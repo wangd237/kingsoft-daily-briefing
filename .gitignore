@@ -52,3 +52,4 @@ temp/
 # Playwright
 playwright-report/
 test-results/
+output/
