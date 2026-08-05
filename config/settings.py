@@ -110,6 +110,20 @@ COLLECTORS = {
         'credibility': '【媒体报道】',
         'enable_summary': True,
     },
+    'cls': {
+        'enabled': True,
+        'name': '财联社',
+        'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
+    'huxiu': {
+        'enabled': True,
+        'name': '虎嗅',
+        'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
 }
 
 # 分类关键词
