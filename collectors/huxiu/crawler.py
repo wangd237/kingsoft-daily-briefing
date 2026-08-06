@@ -269,6 +269,46 @@ class HuxiuCrawler(BaseCrawler):
 
         return results
 
+    def _get_url_by_click(self, page, title: str) -> str:
+        """通过点击搜索结果项，在新标签页中获取真实文章 URL。"""
+        self.logger.info(f"  尝试点击获取URL: {title[:50]}...")
+        try:
+            # 通过标题找到结果项的索引
+            items = page.locator(".search-result .pointer").all()
+            self.logger.info(f"  当前结果页共 {len(items)} 条结果")
+
+            target_idx = -1
+            for idx, item in enumerate(items):
+                try:
+                    item_title = item.locator("h5.result-article__title").inner_text().strip()
+                    if item_title == title:
+                        target_idx = idx
+                        break
+                except Exception as e:
+                    self.logger.debug(f"  读取第 {idx} 条标题失败: {e}")
+                    continue
+
+            if target_idx < 0:
+                self.logger.warning(f"  未找到标题匹配的结果项: {title[:50]}")
+                return ""
+
+            self.logger.info(f"  点击第 {target_idx} 条结果")
+
+            # 点击标题元素，监听新标签页
+            title_locator = items[target_idx].locator("h5.result-article__title")
+            with page.expect_popup() as popup_info:
+                title_locator.click()
+            new_page = popup_info.value
+            new_page.wait_for_load_state("domcontentloaded", timeout=10000)
+            url = new_page.url
+            new_page.close()
+
+            self.logger.info(f"  点击获取URL成功: {url}")
+            return url
+        except Exception as e:
+            self.logger.error(f"  点击获取URL失败: {e}")
+            return ""
+
     def _search_keyword(self, page, keyword: str, retry_count: int = 0) -> List[Dict]:
         """搜索单个关键词（交互式搜索）"""
         results = []
@@ -345,6 +385,15 @@ class HuxiuCrawler(BaseCrawler):
                 filtered_results.append(item)
 
             self.logger.info(f"[{keyword}] 过滤后: {len(filtered_results)}/{len(results)} 条")
+
+            # 对过滤后的结果点击获取真实 URL
+            for item in filtered_results:
+                title = item.get('title', '')
+                if title:
+                    url = self._get_url_by_click(page, title)
+                    if url:
+                        item['url'] = url
+
             results = filtered_results
 
         except Exception as e:
