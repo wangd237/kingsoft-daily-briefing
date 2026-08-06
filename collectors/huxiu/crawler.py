@@ -16,8 +16,9 @@ from pathlib import Path
 import time
 import os
 import re
-
+import random
 import sys
+from urllib.parse import urljoin
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from collectors.base import BaseCrawler
@@ -125,7 +126,7 @@ class HuxiuCrawler(BaseCrawler):
 
         # 处理 "X分钟前"
         match = re.search(r'(\d+)分钟前', time_str)
-        if match:
+        if match: 
             minutes = int(match.group(1))
             return now - timedelta(minutes=minutes)
 
@@ -185,43 +186,155 @@ class HuxiuCrawler(BaseCrawler):
         return any(kw.lower() in title_lower for kw in self.keywords)
 
     def _check_captcha(self, page) -> bool:
-        """检查是否触发了验证码，返回True表示触发了验证码"""
-        try:
-            page_title = page.title()
-            page_content = page.content()
+        """检查是否触发了验证码，返回True表示触发了验证码。
 
-            captcha_indicators = ['验证', 'captcha', 'aliyunCaptcha', '安全验证', '访问验证', '点击验证']
-            for indicator in captcha_indicators:
-                if indicator in page_title or indicator in page_content:
+        只根据页面标题和URL判断，避免扫描整个HTML内容导致误判。
+        """
+        try:
+            page_title = page.title().lower()
+            current_url = page.url.lower()
+
+            # 标题类验证码标识
+            title_indicators = [
+                '验证', 'captcha', '安全验证', '访问验证', '点击验证',
+                '滑块验证', '人机验证', '智能验证'
+            ]
+            for indicator in title_indicators:
+                if indicator in page_title:
                     return True
 
-            # 检查URL是否跳转到验证页面
-            current_url = page.url
-            if 'captcha' in current_url.lower() or 'verify' in current_url.lower():
-                return True
+            # URL类验证码标识
+            url_indicators = ['captcha', 'verify', 'aliyun']
+            for indicator in url_indicators:
+                if indicator in current_url:
+                    return True
 
             return False
-        except:
+        except Exception:
             return False
+
+    def _human_delay(self, page, min_ms: int = 500, max_ms: int = 1500):
+        """模拟真人操作间隔"""
+        page.wait_for_timeout(random.randint(min_ms, max_ms))
+
+    def _open_search_box(self, page) -> bool:
+        """如果搜索框未直接显示，尝试点击搜索图标展开。"""
+        self.logger.info("  搜索框未直接显示，尝试点击搜索图标...")
+        selectors = [
+            'i.icon-search',
+            '.header-search',
+            '.search-btn',
+            '.search-icon',
+            'header [class*="search"]',
+        ]
+        for sel in selectors:
+            icon = page.locator(sel).first
+            try:
+                if icon.is_visible():
+                    icon.click()
+                    self._human_delay(page, 600, 1200)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _find_search_input(self, page):
+        """尝试多种方式定位搜索输入框。"""
+        # 1) 精确匹配虎嗅搜索框 placeholder
+        locator = page.locator('input[placeholder="搜索文章"]')
+        if locator.count() > 0 and locator.first.is_visible():
+            return locator.first
+
+        # 2) 通过 placeholder 模糊查找
+        for placeholder in ["搜索", "搜", "请输入关键词", "Search"]:
+            locator = page.get_by_placeholder(placeholder)
+            if locator.count() > 0 and locator.first.is_visible():
+                return locator.first
+
+        # 3) 通过 role=searchbox 查找
+        locator = page.get_by_role("searchbox")
+        if locator.count() > 0 and locator.first.is_visible():
+            return locator.first
+
+        # 4) 通过通用 input 选择器过滤
+        locator = page.locator('input[type="text"], input[type="search"]').filter(has_text=re.compile("搜索|搜"))
+        if locator.count() > 0 and locator.first.is_visible():
+            return locator.first
+
+        return None
+
+    def _extract_search_results(self, page) -> List[Dict]:
+        """从虎嗅搜索结果页提取内容"""
+        results = []
+
+        try:
+            page.wait_for_selector(".search-result .pointer", timeout=10000)
+        except Exception:
+            self.logger.debug("未找到搜索结果容器 (.search-result .pointer)")
+            return results
+
+        items = page.locator(".search-result .pointer").all()
+        self.logger.info(f"找到 {len(items)} 条搜索结果")
+
+        for item in items:
+            try:
+                title = item.locator("h5.result-article__title").inner_text().strip()
+                summary = item.locator("p.result-article__content").inner_text().strip()
+
+                status_text = item.locator("div.result-article__status").inner_text().strip()
+                parts = [p for p in status_text.split() if p]
+                source = parts[0] if parts else ""
+                pub_time = parts[-1] if len(parts) > 1 else ""
+
+                # 链接：优先取 item 内第一个带 href 的 a 标签
+                url = ""
+                a_tag = item.locator("a[href]").first
+                if a_tag.count() > 0:
+                    url = a_tag.get_attribute("href") or ""
+                url = urljoin(self.base_url, url)
+
+                if title:
+                    results.append({
+                        'title': title,
+                        'url': url,
+                        'time': pub_time,
+                        'summary': summary,
+                        'source': source,
+                    })
+            except Exception as e:
+                self.logger.debug(f"提取搜索结果项失败: {e}")
+                continue
+
+        return results
 
     def _search_keyword(self, page, keyword: str, retry_count: int = 0) -> List[Dict]:
-        """搜索单个关键词"""
+        """搜索单个关键词（交互式搜索）"""
         results = []
         max_retries = 2
 
         try:
-            # 方案1: 直接访问搜索URL（更简单，减少交互）
-            search_url = f"{self.base_url}/search?keyword={keyword}&s=relevance"
-            self.logger.info(f"[{keyword}] 访问搜索页: {search_url}")
+            self.logger.info(f"[{keyword}] 打开虎嗅首页")
+            page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
+            self._human_delay(page, 1500, 2500)
 
-            page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
+            # 调试：记录首页状态
+            home_title = page.title()
+            home_url = page.url
+            self.logger.info(f"[{keyword}] 首页标题: {home_title}")
+            self.logger.info(f"[{keyword}] 首页URL: {home_url}")
+            try:
+                os.makedirs("output/logs", exist_ok=True)
+                page.screenshot(path=f"output/logs/huxiu_{keyword}_home.png")
+                self.logger.info(f"[{keyword}] 首页截图已保存")
+            except Exception as e:
+                self.logger.debug(f"首页截图失败: {e}")
 
-            # 检查是否触发了验证码
+            page.wait_for_selector(".search-btn", timeout=20000)
+            self._human_delay(page, 1200, 2000)
+
+            # 检查验证码
             if self._check_captcha(page):
                 self.logger.warning(f"[{keyword}] 检测到验证码保护")
-                page.screenshot(path=f"output/logs/huxiu_{keyword}_captcha.png")
-
                 if retry_count < max_retries:
                     self.logger.info(f"[{keyword}] 等待10秒后重试...")
                     time.sleep(10)
@@ -230,211 +343,50 @@ class HuxiuCrawler(BaseCrawler):
                     self.logger.error(f"[{keyword}] 重试次数用尽，跳过此关键词")
                     return results
 
-            # 等待搜索结果加载 - 使用更宽松的条件
-            try:
-                # 等待页面稳定
-                page.wait_for_load_state('networkidle', timeout=10000)
-            except:
-                pass
+            # 展开搜索框
+            search_input = self._find_search_input(page)
+            if not search_input:
+                if not self._open_search_box(page):
+                    self.logger.error(f"[{keyword}] 无法展开搜索框")
+                    return results
+                search_input = self._find_search_input(page)
 
-            page.wait_for_timeout(2000)
+            if not search_input:
+                self.logger.error(f"[{keyword}] 无法定位搜索输入框")
+                return results
+
+            # 输入关键词并搜索
+            self.logger.info(f"[{keyword}] 输入关键词并搜索")
+            search_input.click()
+            self._human_delay(page, 300, 800)
+            search_input.fill("")
+            search_input.type(keyword, delay=random.randint(80, 180))
+            self._human_delay(page, 600, 1200)
+            search_input.press("Enter")
+
+            # 等待结果加载
+            self._human_delay(page, 2000, 3500)
+
+            # 提取结果
+            results = self._extract_search_results(page)
+            self.logger.info(f"[{keyword}] 成功提取 {len(results)} 条")
 
             # 截图调试
-            page.screenshot(path=f"output/logs/huxiu_{keyword}_search.png")
-
-            # 方式1：从 window.__INITIAL_STATE__ 提取
-            initial_state = page.evaluate('''() => {
-                return window.__INITIAL_STATE__ || window.initialState || null;
-            }''')
-
-            if initial_state:
-                try:
-                    self.logger.info(f"[{keyword}] 找到 initialState")
-                    search_data = None
-                    if isinstance(initial_state, dict):
-                        # 虎嗅可能的数据结构
-                        if 'search' in initial_state:
-                            search_data = initial_state['search'].get('articleList', [])
-                        elif 'searchResult' in initial_state:
-                            search_data = initial_state['searchResult'].get('list', [])
-                        elif 'articleList' in initial_state:
-                            search_data = initial_state['articleList']
-
-                    if search_data and isinstance(search_data, list):
-                        self.logger.info(f"[{keyword}] 从 initialState 提取到 {len(search_data)} 条结果")
-                        for item in search_data:
-                            if not isinstance(item, dict):
-                                continue
-                            title = item.get('title', '').strip()
-                            if not title:
-                                continue
-
-                            url = item.get('url', '') or item.get('shareUrl', '')
-                            if not url:
-                                item_id = item.get('aid', '') or item.get('id', '')
-                                if item_id:
-                                    url = f"{self.base_url}/article/{item_id}.html"
-                            elif not url.startswith('http'):
-                                url = f"{self.base_url}{url}"
-
-                            if title and url:
-                                results.append({
-                                    'title': title.strip(),
-                                    'url': url,
-                                    'time': item.get('time', '') or item.get('publishTime', '') or item.get('ctime', ''),
-                                    'summary': item.get('summary', '') or item.get('brief', ''),
-                                })
-                except Exception as e:
-                    self.logger.debug(f"[{keyword}] 解析 initialState 失败: {e}")
-
-            # 方式2：从 DOM 提取
-            if not results:
-                self.logger.info(f"[{keyword}] 尝试从 DOM 提取结果")
-
-                try:
-                    # 滚动页面触发懒加载
-                    page.evaluate('''() => { window.scrollTo(0, 500); }''')
-                    time.sleep(1)
-
-                    # 虎嗅搜索结果可能的选择器 - 基于实际页面结构
-                    selectors = [
-                        '.search-list .search-item',
-                        '.article-list .article-item',
-                        '.search-wrap .item',
-                        '.search-result-item',
-                        '.article-card',
-                        '[class*="search"] [class*="item"]',
-                        '.article-item',
-                        '.search-content .item',
-                        '.article-wrap',
-                        '.search-result',
-                        '.content-list .content-item',
-                    ]
-
-                    list_items = []
-                    for selector in selectors:
-                        try:
-                            items = page.locator(selector).all()
-                            if items and len(items) > 0:
-                                self.logger.info(f"[{keyword}] 使用选择器 '{selector}' 找到 {len(items)} 个列表项")
-                                list_items = items
-                                break
-                        except Exception:
-                            continue
-
-                    # 如果上述选择器都没有找到，尝试通过链接找
-                    if not list_items:
-                        # 获取所有包含文章链接的元素
-                        article_links = page.locator('a[href*="/article/"]').all()
-                        self.logger.info(f"[{keyword}] 使用文章链接选择器找到 {len(article_links)} 个链接")
-
-                        # 过滤出包含标题的链接
-                        for link in article_links[:20]:  # 限制数量
-                            try:
-                                title = link.text_content(timeout=100) or ''
-                                if title.strip() and len(title.strip()) > 5:
-                                    list_items.append(link)
-                            except:
-                                continue
-
-                    self.logger.info(f"[{keyword}] 共处理 {len(list_items)} 个列表项")
-
-                    for item in list_items[:self.max_items_per_keyword]:
-                        try:
-                            # 提取标题
-                            title = ''
-                            try:
-                                # 直接获取元素文本
-                                title = item.text_content(timeout=100) or ''
-                                if not title.strip():
-                                    # 尝试子元素
-                                    for title_selector in ['.title', 'h2', 'h3', '.article-title', '.article-card-title']:
-                                        try:
-                                            title_el = item.locator(title_selector).first
-                                            title = title_el.text_content(timeout=100) or ''
-                                            if title.strip():
-                                                break
-                                        except:
-                                            continue
-                            except:
-                                pass
-
-                            # 提取链接
-                            url = ''
-                            try:
-                                url = item.get_attribute('href') or ''
-                            except:
-                                try:
-                                    link_el = item.locator('a').first
-                                    url = link_el.get_attribute('href') or ''
-                                except:
-                                    pass
-
-                            if url and not url.startswith('http'):
-                                url = f"{self.base_url}{url}"
-
-                            # 提取时间 - 从文本中匹配
-                            pub_time = ''
-                            item_text = ''
-                            try:
-                                item_text = item.text_content(timeout=100) or ''
-                                # 从文本中提取时间
-                                time_patterns = [
-                                    r'(\d{4}-\d{2}-\d{2})',
-                                    r'(\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2})',
-                                    r'(\d+)\s*分钟前',
-                                    r'(\d+)\s*小时前',
-                                    r'(刚刚)',
-                                    r'(昨天)',
-                                ]
-                                for pattern in time_patterns:
-                                    match = re.search(pattern, item_text)
-                                    if match:
-                                        pub_time = match.group(0)
-                                        break
-                            except:
-                                pass
-
-                            # 提取摘要
-                            summary = ''
-                            for summary_selector in ['.summary', '.brief', '.desc', '.article-desc', '.content-desc']:
-                                try:
-                                    summary_el = item.locator(summary_selector).first
-                                    summary = summary_el.text_content(timeout=100) or ''
-                                    if summary.strip() and summary != title:
-                                        break
-                                except:
-                                    continue
-
-                            if title.strip() and url and '/article/' in url:
-                                results.append({
-                                    'title': title.strip(),
-                                    'url': url,
-                                    'time': pub_time.strip(),
-                                    'summary': summary.strip(),
-                                })
-                        except Exception as item_e:
-                            self.logger.debug(f"解析列表项失败: {item_e}")
-                            continue
-
-                except Exception as e:
-                    self.logger.error(f"[{keyword}] DOM 提取失败: {e}")
-
-            self.logger.info(f"[{keyword}] 成功提取 {len(results)} 条")
+            try:
+                page.screenshot(path=f"output/logs/huxiu_{keyword}_search.png")
+            except Exception:
+                pass
 
             # 过滤：关键词匹配 + 时间窗口
             filtered_results = []
-
             for item in results:
                 title = item.get('title', '')
                 time_str = item.get('time', '')
 
-                # 检查关键词匹配（标题必须包含关键词）
                 if not self._matches_keywords(title):
                     self.logger.debug(f"[{keyword}] 关键词过滤: {title[:50]}...")
                     continue
 
-                # 检查时间是否在窗口内
                 if not self._is_in_time_window(time_str):
                     self.logger.debug(f"[{keyword}] 时间过滤: {title[:50]}... (时间: {time_str})")
                     continue
@@ -653,48 +605,16 @@ class HuxiuCrawler(BaseCrawler):
         captcha_detected = False
 
         with sync_playwright() as p:
-            # 使用更真实的浏览器配置
-            browser = p.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled']
-            )
+            # 与 test.py 保持一致的最小浏览器配置
+            browser = p.chromium.launch(headless=False)
 
-            # 更真实的浏览器上下文
             context = browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
                 locale='zh-CN',
                 timezone_id='Asia/Shanghai',
-                extra_http_headers={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                }
             )
 
-            # 添加 Cookie 和 localStorage 来模拟真实用户
-            context.add_cookies([
-                {'name': 'huxiu', 'value': '1', 'domain': '.huxiu.com', 'path': '/'}
-            ])
-
-            # 创建页面
             page = context.new_page()
-
-            # 使用 playwright-stealth 隐藏自动化特征
-            if STEALTH_AVAILABLE:
-                Stealth().apply_stealth_sync(page)
-                self.logger.info("已启用 playwright-stealth 反检测模式")
-            else:
-                # 备用：手动注入基础 stealth 脚本
-                page.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', {
-                        get: () => undefined
-                    });
-                """)
-                self.logger.warning("playwright-stealth 未安装，使用基础反检测模式")
 
             try:
                 for keyword in self.keywords:
@@ -803,7 +723,7 @@ def main():
     import os
 
     # 支持环境变量配置时间窗口（默认24小时）
-    hours_window = int(os.getenv('HUXIU_HOURS_WINDOW', '24'))
+    hours_window = int(os.getenv('HUXIU_HOURS_WINDOW', '1560'))
     # 是否启用备选方案（直接访问文章ID）
     use_direct_ids = os.getenv('HUXIU_USE_DIRECT_IDS', 'false').lower() == 'true'
 
