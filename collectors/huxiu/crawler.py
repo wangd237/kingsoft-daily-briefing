@@ -25,13 +25,6 @@ from collectors.base import BaseCrawler
 from models.news import NewsItem
 from config.settings import CATEGORIES, COLLECTORS
 
-# 尝试导入 playwright-stealth
-try:
-    from playwright_stealth.stealth import Stealth
-    STEALTH_AVAILABLE = True
-except ImportError:
-    STEALTH_AVAILABLE = False
-
 
 class HuxiuCrawler(BaseCrawler):
     """虎嗅采集器"""
@@ -40,17 +33,11 @@ class HuxiuCrawler(BaseCrawler):
     source_code = "huxiu"
     credibility_base = "【媒体报道】"
 
-    # 虎嗅文章 id 范围（用于备选采集）
-    # 最新的文章ID通常在 3000000 以上
-    LATEST_ARTICLE_ID_MIN = 3100000
-    LATEST_ARTICLE_ID_MAX = 3200000
-
-    def __init__(self, enable_summary: bool = None, hours_window: int = 24, use_direct_ids: bool = False):
+    def __init__(self, enable_summary: bool = None, hours_window: int = 24):
         # 从配置读取参数
         config = COLLECTORS.get('huxiu', {})
         self.keywords = config.get('keywords', ['金山办公'])
         self.max_items_per_keyword = 50  # 提高上限，过滤后保留足够数据
-        self.use_direct_ids = use_direct_ids  # 是否使用直接访问文章ID的方式
 
         # 时间窗口（默认24小时）
         self.hours_window = hours_window
@@ -238,31 +225,6 @@ class HuxiuCrawler(BaseCrawler):
                 continue
         return False
 
-    def _find_search_input(self, page):
-        """尝试多种方式定位搜索输入框。"""
-        # 1) 精确匹配虎嗅搜索框 placeholder
-        locator = page.locator('input[placeholder="搜索文章"]')
-        if locator.count() > 0 and locator.first.is_visible():
-            return locator.first
-
-        # 2) 通过 placeholder 模糊查找
-        for placeholder in ["搜索", "搜", "请输入关键词", "Search"]:
-            locator = page.get_by_placeholder(placeholder)
-            if locator.count() > 0 and locator.first.is_visible():
-                return locator.first
-
-        # 3) 通过 role=searchbox 查找
-        locator = page.get_by_role("searchbox")
-        if locator.count() > 0 and locator.first.is_visible():
-            return locator.first
-
-        # 4) 通过通用 input 选择器过滤
-        locator = page.locator('input[type="text"], input[type="search"]').filter(has_text=re.compile("搜索|搜"))
-        if locator.count() > 0 and locator.first.is_visible():
-            return locator.first
-
-        return None
-
     def _extract_search_results(self, page) -> List[Dict]:
         """从虎嗅搜索结果页提取内容"""
         results = []
@@ -315,20 +277,6 @@ class HuxiuCrawler(BaseCrawler):
         try:
             self.logger.info(f"[{keyword}] 打开虎嗅首页")
             page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
-            self._human_delay(page, 1500, 2500)
-
-            # 调试：记录首页状态
-            home_title = page.title()
-            home_url = page.url
-            self.logger.info(f"[{keyword}] 首页标题: {home_title}")
-            self.logger.info(f"[{keyword}] 首页URL: {home_url}")
-            try:
-                os.makedirs("output/logs", exist_ok=True)
-                page.screenshot(path=f"output/logs/huxiu_{keyword}_home.png")
-                self.logger.info(f"[{keyword}] 首页截图已保存")
-            except Exception as e:
-                self.logger.debug(f"首页截图失败: {e}")
-
             page.wait_for_selector(".search-btn", timeout=20000)
             self._human_delay(page, 1200, 2000)
 
@@ -343,17 +291,20 @@ class HuxiuCrawler(BaseCrawler):
                     self.logger.error(f"[{keyword}] 重试次数用尽，跳过此关键词")
                     return results
 
-            # 展开搜索框
-            search_input = self._find_search_input(page)
-            if not search_input:
-                if not self._open_search_box(page):
-                    self.logger.error(f"[{keyword}] 无法展开搜索框")
-                    return results
-                search_input = self._find_search_input(page)
-
-            if not search_input:
-                self.logger.error(f"[{keyword}] 无法定位搜索输入框")
+            # 展开搜索框并输入关键词
+            self.logger.info(f"[{keyword}] 点击搜索图标")
+            if not self._open_search_box(page):
+                self.logger.error(f"[{keyword}] 无法展开搜索框")
                 return results
+
+            self.logger.info(f"[{keyword}] 等待搜索输入框")
+            try:
+                page.wait_for_selector('input[placeholder="搜索文章"]', timeout=10000)
+            except Exception:
+                self.logger.error(f"[{keyword}] 未找到搜索输入框")
+                return results
+
+            search_input = page.locator('input[placeholder="搜索文章"]').first
 
             # 输入关键词并搜索
             self.logger.info(f"[{keyword}] 输入关键词并搜索")
@@ -399,92 +350,6 @@ class HuxiuCrawler(BaseCrawler):
         except Exception as e:
             self.logger.error(f"[{keyword}] 搜索失败: {e}")
 
-        return results
-
-    def _fetch_recent_articles(self, page) -> List[Dict]:
-        """
-        备选方案：直接访问最近的文章ID
-        当搜索功能被验证码拦截时使用
-        """
-        results = []
-        self.logger.info("使用备选方案：直接访问最近文章")
-
-        # 虎嗅文章ID范围（最近的文章ID）
-        # 需要根据实际情况调整这个范围
-        recent_ids = range(self.LATEST_ARTICLE_ID_MIN, self.LATEST_ARTICLE_ID_MAX, 100)  # 步长100，减少请求
-
-        for article_id in recent_ids:
-            if self.captcha_detected:
-                break
-
-            url = f"{self.base_url}/article/{article_id}.html"
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(2000)
-
-                # 检查是否触发验证码
-                if self._check_captcha(page):
-                    self.logger.warning(f"[ID:{article_id}] 触发验证码，停止备选采集")
-                    self.captcha_detected = True
-                    break
-
-                # 检查页面是否存在（404检查）
-                title = page.title()
-                if '404' in title or '找不到' in title or '不存在' in title:
-                    continue
-
-                # 提取文章信息
-                article_data = page.evaluate('''() => {
-                    const data = {
-                        title: document.title?.replace(' - 虎嗅网', '') || '',
-                        time: '',
-                        summary: ''
-                    };
-
-                    // 尝试从 meta 标签获取时间
-                    const timeMeta = document.querySelector('meta[property="article:published_time"]');
-                    if (timeMeta) {
-                        data.time = timeMeta.content;
-                    }
-
-                    // 尝试从页面元素获取时间
-                    if (!data.time) {
-                        const timeEl = document.querySelector('.article-time, .publish-time, [class*="time"]');
-                        if (timeEl) {
-                            data.time = timeEl.textContent || '';
-                        }
-                    }
-
-                    // 尝试获取摘要
-                    const descMeta = document.querySelector('meta[name="description"]');
-                    if (descMeta) {
-                        data.summary = descMeta.content || '';
-                    }
-
-                    return data;
-                }''')
-
-                if article_data and article_data.get('title'):
-                    title = article_data['title']
-
-                    # 检查是否匹配关键词
-                    if self._matches_keywords(title):
-                        results.append({
-                            'title': title,
-                            'url': url,
-                            'time': article_data.get('time', ''),
-                            'summary': article_data.get('summary', ''),
-                        })
-                        self.logger.info(f"[ID:{article_id}] 找到匹配文章: {title[:40]}...")
-
-                # 随机延迟，避免请求过快
-                time.sleep(2)
-
-            except Exception as e:
-                self.logger.debug(f"[ID:{article_id}] 获取失败: {e}")
-                continue
-
-        self.logger.info(f"备选方案共找到 {len(results)} 条匹配文章")
         return results
 
     def _fetch_content(self, page, url: str) -> str:
@@ -602,8 +467,6 @@ class HuxiuCrawler(BaseCrawler):
 
         from playwright.sync_api import sync_playwright
 
-        captcha_detected = False
-
         with sync_playwright() as p:
             # 与 test.py 保持一致的最小浏览器配置
             browser = p.chromium.launch(headless=False)
@@ -621,14 +484,6 @@ class HuxiuCrawler(BaseCrawler):
                     self.logger.info(f"搜索关键词: {keyword}")
 
                     results = self._search_keyword(page, keyword)
-
-                    # 如果检测到验证码，标记并跳出
-                    if not results:
-                        page_title = page.title()
-                        if "验证" in page_title:
-                            self.captcha_detected = True
-                            captcha_detected = True
-                            break
 
                     for news in results:
                         url = news['url']
@@ -667,51 +522,11 @@ class HuxiuCrawler(BaseCrawler):
 
                     time.sleep(2)
 
-                # 如果搜索被验证码拦截，尝试备选方案
-                if captcha_detected and not all_items and self.use_direct_ids:
-                    self.logger.info("搜索被验证码拦截，尝试备选采集方案...")
-                    backup_results = self._fetch_recent_articles(page)
-
-                    for news in backup_results:
-                        url = news['url']
-
-                        # 去重
-                        if url in self.seen_urls:
-                            continue
-                        self.seen_urls.add(url)
-
-                        self.logger.info(f"获取正文: {news['title'][:50]}...")
-                        content = self._fetch_content(page, url)
-
-                        # 创建 NewsItem
-                        item = NewsItem(
-                            title=news['title'],
-                            date=self._parse_time(news.get('time', '')),
-                            url=url,
-                            source=self.source_name,
-                            source_code=self.source_code,
-                            credibility_tag=self.credibility_base,
-                            category=self._auto_classify(news['title']),
-                            summary=news.get('summary', '') or news['title'][:150],
-                            content=content,
-                            raw_data={'source': 'direct_id'},
-                        )
-
-                        # AI 摘要
-                        if content and len(content.strip()) > 50:
-                            ai_summary, summary_time = self.generate_summary(news['title'], content)
-                            if ai_summary:
-                                item.summary = ai_summary
-                                item.summary_generated_at = summary_time
-
-                        all_items.append(item)
-                        time.sleep(1)
-
             finally:
                 context.close()
                 browser.close()
 
-        if captcha_detected:
+        if self.captcha_detected:
             self.logger.warning("虎嗅网触发了验证码保护，本次采集提前结束")
 
         self.logger.info(f"采集完成: 共 {len(all_items)} 条")
@@ -720,14 +535,10 @@ class HuxiuCrawler(BaseCrawler):
 
 def main():
     """测试运行"""
-    import os
-
     # 支持环境变量配置时间窗口（默认24小时）
     hours_window = int(os.getenv('HUXIU_HOURS_WINDOW', '1560'))
-    # 是否启用备选方案（直接访问文章ID）
-    use_direct_ids = os.getenv('HUXIU_USE_DIRECT_IDS', 'false').lower() == 'true'
 
-    crawler = HuxiuCrawler(hours_window=hours_window, use_direct_ids=use_direct_ids)
+    crawler = HuxiuCrawler(hours_window=hours_window)
     items = crawler.run()
 
     print(f"\n{'='*70}")
@@ -736,7 +547,6 @@ def main():
     print(f"截止时间: {crawler.cutoff_time.strftime('%Y-%m-%d %H:%M')}")
     if crawler.captcha_detected:
         print("注意: 虎嗅网触发了验证码保护")
-        print("建议: 1) 稍后重试 2) 设置 HUXIU_USE_DIRECT_IDS=true 启用备选方案")
     print('='*70)
 
     for i, item in enumerate(items, 1):
