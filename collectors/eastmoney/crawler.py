@@ -11,7 +11,6 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 from datetime import datetime, timedelta
-from typing import List, Dict, Set
 from pathlib import Path
 import time
 import os
@@ -26,11 +25,33 @@ from config.settings import CATEGORIES, COLLECTORS
 
 
 class EastMoneyCrawler(BaseCrawler):
-    """东方财富网采集器"""
+    """东方财富网采集器
+
+    使用 so.eastmoney.com 的三个专业频道：
+    - news: 资讯 (finance.eastmoney.com)
+    - report: 研报 (data.eastmoney.com)
+    - article: 文章/财富号 (caifuhao.eastmoney.com)
+    """
 
     source_name = "东方财富网"
     source_code = "eastmoney"
     credibility_base = "【媒体报道】"
+
+    # 三个搜索路由
+    ROUTES = {
+        'news': {
+            'name': '资讯',
+            'search_url': 'https://so.eastmoney.com/news/s?keyword={keyword}',
+        },
+        'report': {
+            'name': '研报',
+            'search_url': 'https://so.eastmoney.com/report/s?keyword={keyword}',
+        },
+        'article': {
+            'name': '文章',
+            'search_url': 'https://so.eastmoney.com/article/s?keyword={keyword}',
+        },
+    }
 
     def __init__(self, enable_summary: bool = None, hours_window: int = 24):
         # 从配置读取参数
@@ -52,7 +73,7 @@ class EastMoneyCrawler(BaseCrawler):
         self.base_url = "https://search.eastmoney.com"
 
         # 已抓取的URL集合
-        self.seen_urls: Set[str] = set()
+        self.seen_urls: set[str] = set()
 
     def _auto_classify(self, title: str) -> str:
         """自动分类"""
@@ -91,14 +112,17 @@ class EastMoneyCrawler(BaseCrawler):
 
         return datetime.now().strftime('%Y-%m-%d')
 
-    def _parse_eastmoney_time(self, time_str: str) -> datetime:
+    def _parse_eastmoney_time(self, time_str: str) -> datetime | None:
         """
         解析东方财富网的时间格式
         支持: "刚刚", "X分钟前", "X小时前", "昨天", "昨天 15:30",
-              "2025-08-04", "08-04 15:30", "今天 15:30"
+              "2025-08-04 17:19:24", "2025-08-04", "08-04 15:30", "今天 15:30"
+
+        Returns:
+            解析成功的 datetime，失败返回 None
         """
         if not time_str:
-            return datetime.now()
+            return None
 
         time_str = time_str.strip()
         now = datetime.now()
@@ -135,7 +159,14 @@ class EastMoneyCrawler(BaseCrawler):
             else:
                 return (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # 处理 "YYYY-MM-DD" 或 "YYYY/MM/DD"
+        # 优先处理完整格式 "YYYY-MM-DD HH:MM:SS" 或 "YYYY-MM-DD HH:MM"
+        match = re.search(r'(\d{4})[-/](\d{2})[-/](\d{2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?', time_str)
+        if match:
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            hour, minute = int(match.group(4)), int(match.group(5))
+            return datetime(year, month, day, hour, minute)
+
+        # 处理 "YYYY-MM-DD" 或 "YYYY/MM/DD"（纯日期，假设时间为 00:00）
         match = re.search(r'(\d{4})[-/](\d{2})[-/](\d{2})', time_str)
         if match:
             year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
@@ -147,17 +178,18 @@ class EastMoneyCrawler(BaseCrawler):
             month, day, hour, minute = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
             return datetime(now.year, month, day, hour, minute)
 
-        # 解析失败，返回当前时间（保留数据）
-        return now
+        # 解析失败，返回 None（不保留数据）
+        return None
 
     def _is_in_time_window(self, time_str: str) -> bool:
         """判断时间是否在过去指定小时内"""
         try:
             parsed_time = self._parse_eastmoney_time(time_str)
+            if parsed_time is None:
+                return False  # 解析失败视为不符合条件
             return parsed_time >= self.cutoff_time
         except:
-            # 解析失败默认保留
-            return True
+            return False  # 异常视为不符合条件
 
     def _matches_keywords(self, title: str) -> bool:
         """检查标题是否包含任一关键词"""
@@ -166,157 +198,171 @@ class EastMoneyCrawler(BaseCrawler):
         title_lower = title.lower()
         return any(kw.lower() in title_lower for kw in self.keywords)
 
-    def _search_keyword(self, page, keyword: str) -> List[Dict]:
-        """搜索单个关键词"""
+    # ... 前面的代码 ...
+
+    def _search_single_route(self, page, keyword: str, route_type: str) -> list[dict]:
+        """搜索单个路由（资讯/研报/文章）"""
         results = []
+        route = self.ROUTES.get(route_type)
+        if not route:
+            return results
+
+        search_url = route['search_url'].format(keyword=keyword)
+        self.logger.info(f"[{route['name']}] 搜索: {keyword}")
 
         try:
-            # 东方财富搜索URL
-            search_url = f"{self.base_url}/Search/web?q={keyword}"
-            self.logger.info(f"[{keyword}] 访问搜索页: {search_url}")
+            page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2000)
 
-            page.goto(search_url, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
-
-            # 等待搜索结果加载
+            # 截图调试 - 保存到日志目录
             try:
-                # 东方财富搜索结果通常在 .common-item 或 .article-item 中
-                page.wait_for_selector('.common-item, .article-item, .search-item', timeout=15000)
-                self.logger.info(f"[{keyword}] 搜索结果列表已加载")
-            except:
-                self.logger.warning(f"[{keyword}] 等待列表超时")
-
-            # 截图调试
-            page.screenshot(path=f"output/logs/eastmoney_{keyword}_search.png")
-
-            # 从 DOM 提取搜索结果
-            try:
-                # 东方财富搜索结果选择器
-                selectors = [
-                    '.common-item',
-                    '.article-item',
-                    '.search-item',
-                    '.result-item',
-                    '[class*="item"]',
-                ]
-
-                list_items = []
-                for selector in selectors:
-                    try:
-                        items = page.locator(selector).all()
-                        if items and len(items) > 0:
-                            self.logger.info(f"[{keyword}] 使用选择器 '{selector}' 找到 {len(items)} 个列表项")
-                            list_items = items
-                            break
-                    except Exception:
-                        continue
-
-                for item in list_items[:self.max_items_per_keyword]:
-                    try:
-                        # 提取标题
-                        title = ''
-                        for title_selector in ['.title', 'h3', 'h4', '.article-title', 'a']:
-                            try:
-                                title_el = item.locator(title_selector).first
-                                title = title_el.text_content(timeout=100) or ''
-                                if title.strip():
-                                    break
-                            except:
-                                continue
-
-                        # 提取链接
-                        url = ''
-                        try:
-                            link_el = item.locator('a').first
-                            url = link_el.get_attribute('href') or ''
-                        except:
-                            pass
-
-                        if url and not url.startswith('http'):
-                            url = f"https:{url}" if url.startswith('//') else f"https://finance.eastmoney.com{url}"
-
-                        # 提取时间
-                        pub_time = ''
-                        try:
-                            item_text = item.text_content(timeout=100) or ''
-                            # 从文本中提取时间
-                            time_patterns = [
-                                r'(\d{4}-\d{2}-\d{2})',
-                                r'(\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2})',
-                                r'(\d+)\s*分钟前',
-                                r'(\d+)\s*小时前',
-                                r'(刚刚)',
-                                r'(昨天)',
-                            ]
-                            for pattern in time_patterns:
-                                match = re.search(pattern, item_text)
-                                if match:
-                                    pub_time = match.group(0)
-                                    break
-                        except:
-                            pass
-
-                        # 提取摘要
-                        summary = ''
-                        for summary_selector in ['.summary', '.brief', '.desc', '.content', 'p']:
-                            try:
-                                summary_el = item.locator(summary_selector).first
-                                summary = summary_el.text_content(timeout=100) or ''
-                                if summary.strip() and summary != title:
-                                    break
-                            except:
-                                continue
-
-                        if title.strip() and url:
-                            results.append({
-                                'title': title.strip(),
-                                'url': url,
-                                'time': pub_time.strip(),
-                                'summary': summary.strip(),
-                            })
-                    except Exception as e:
-                        self.logger.debug(f"解析列表项失败: {e}")
-                        continue
-
+                import os
+                os.makedirs("output/logs", exist_ok=True)
+                page.screenshot(path=f"output/logs/eastmoney_{route_type}_{keyword}.png")
+                self.logger.info(f"[{route['name']}] 已保存截图: output/logs/eastmoney_{route_type}_{keyword}.png")
             except Exception as e:
-                self.logger.error(f"[{keyword}] DOM 提取失败: {e}")
+                self.logger.debug(f"截图失败: {e}")
 
-            self.logger.info(f"[{keyword}] 成功提取 {len(results)} 条")
+            # 等待结果加载 - 使用更通用的选择器
+            try:
+                page.wait_for_selector('.news-list, .result-list, [class*="list"]', timeout=10000)
+            except:
+                pass  # 继续尝试提取
 
-            # 过滤：关键词匹配 + 时间窗口
-            filtered_results = []
+            # 提取列表项 - 针对不同路由使用精确选择器
+            list_items = []
+            route_selectors = {
+                'news': ['div.news_item'],           # 资讯
+                'report': ['div.notice_item'],       # 研报
+                'article': ['div.cfh_item'],         # 文章
+            }
 
-            for item in results:
-                title = item.get('title', '')
-                time_str = item.get('time', '')
+            selectors = route_selectors.get(route_type, ['div.news_item', 'div.notice_item', 'div.cfh_item'])
 
-                # 检查关键词匹配（标题必须包含关键词）
-                if not self._matches_keywords(title):
-                    self.logger.debug(f"[{keyword}] 关键词过滤: {title[:50]}...")
+            for selector in selectors:
+                try:
+                    items = page.locator(selector).all()
+                    if items and len(items) > 0:
+                        self.logger.info(f"[{route['name']}] 使用选择器 '{selector}' 找到 {len(items)} 个列表项")
+                        list_items = items
+                        break
+                except Exception:
                     continue
 
-                # 检查时间是否在窗口内
-                if not self._is_in_time_window(time_str):
-                    self.logger.debug(f"[{keyword}] 时间过滤: {title[:50]}... (时间: {time_str})")
+            if not list_items:
+                # 最后的尝试：找包含时间格式的 div
+                try:
+                    all_divs = page.locator('div').all()
+                    for div in all_divs:
+                        text = div.text_content(timeout=100) or ''
+                        if re.search(r'\d{4}-\d{2}-\d{2}', text) and 'http' in text:
+                            list_items.append(div)
+                    self.logger.info(f"[{route['name']}] 通过时间格式匹配找到 {len(list_items)} 个可能项")
+                except:
+                    pass
+
+            self.logger.info(f"[{route['name']}] 找到 {len(list_items)} 条原始结果")
+
+            # 根据路由类型定义提取选择器
+            extract_config = {
+                'news': {
+                    'title': ['.news_item_t a'],
+                    'time': '.news_item_time',
+                    'summary': ['.news_item_c span'],
+                },
+                'report': {
+                    'title': ['.notice_item_t a'],
+                    'time': '.notice_item_time',
+                    'summary': ['.notice_item_c span'],
+                },
+                'article': {
+                    'title': ['.cfh_item_t a'],
+                    'time': '.cfh_item_time',
+                    'summary': ['.cfh_item_cc span'],
+                },
+            }
+            config = extract_config.get(route_type, extract_config['news'])
+
+            for item in list_items[:self.max_items_per_keyword]:
+                try:
+                    # 提取标题
+                    title = ''
+                    for title_sel in config['title']:
+                        try:
+                            title = item.locator(title_sel).first.text_content(timeout=100) or ''
+                            if title.strip():
+                                break
+                        except Exception:
+                            continue
+
+                    # 提取链接
+                    url = ''
+                    try:
+                        url = item.locator('a').first.get_attribute('href', timeout=100) or ''
+                    except Exception:
+                        pass
+
+                    # 补全 URL
+                    if url and not url.startswith('http'):
+                        if url.startswith('//'):
+                            url = f"https:{url}"
+                        elif url.startswith('/'):
+                            url = f"https://so.eastmoney.com{url}"
+                        else:
+                            url = f"https://so.eastmoney.com/{url}"
+
+                    # 提取时间
+                    pub_time = ''
+                    try:
+                        pub_time = item.locator(config['time']).first.text_content(timeout=100) or ''
+                    except Exception:
+                        pass
+
+                    # 提取摘要
+                    summary = ''
+                    for sum_sel in config['summary']:
+                        try:
+                            summary = item.locator(sum_sel).first.text_content(timeout=100) or ''
+                            if summary.strip() and summary != title:
+                                break
+                        except Exception:
+                            continue
+
+                    if title.strip() and url:
+                        results.append({
+                            'title': title.strip(),
+                            'url': url,
+                            'time': pub_time.strip(),
+                            'summary': summary.strip(),
+                            'route_type': route_type,
+                            'route_name': route['name'],
+                        })
+                except Exception as e:
+                    self.logger.debug(f"解析列表项失败: {e}")
                     continue
 
-                filtered_results.append(item)
-
-            self.logger.info(f"[{keyword}] 过滤后: {len(filtered_results)}/{len(results)} 条")
-            results = filtered_results
+            self.logger.info(f"[{route['name']}] 提取 {len(results)} 条")
 
         except Exception as e:
-            self.logger.error(f"[{keyword}] 搜索失败: {e}")
+            self.logger.error(f"[{route['name']}] 搜索失败: {e}")
 
         return results
 
-    def _fetch_content(self, page, url: str) -> str:
-        """获取详情页正文"""
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
+    def _fetch_content_by_url(self, page, url: str) -> str:
+        """根据 URL 类型选择对应的内容提取策略"""
+        if 'data.eastmoney.com/report' in url:
+            return self._fetch_report_content(page, url)
+        elif 'caifuhao.eastmoney.com' in url:
+            return self._fetch_caifuhao_content(page, url)
+        else:
+            return self._fetch_news_content(page, url)
 
-            # 从 DOM 提取内容
+    def _fetch_news_content(self, page, url: str) -> str:
+        """获取普通资讯详情页 - finance.eastmoney.com"""
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(1500)
+
             content = page.evaluate("""() => {
                 const selectors = [
                     '.article-content',
@@ -327,65 +373,99 @@ class EastMoneyCrawler(BaseCrawler):
                     '#ContentBody',
                     '.txt-content',
                 ];
-
-                for (const selector of selectors) {
-                    const el = document.querySelector(selector);
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
                     if (el) {
                         const text = el.innerText?.trim();
-                        if (text && text.length > 100) {
-                            return text;
-                        }
+                        if (text && text.length > 100) return text;
                     }
                 }
-
-                // 备用：提取所有段落
-                const paragraphs = document.querySelectorAll('p');
+                // 备用：提取段落
+                const pars = document.querySelectorAll('p');
                 const texts = [];
-                paragraphs.forEach(p => {
-                    const text = p.innerText?.trim();
-                    if (text && text.length > 20) {
-                        texts.push(text);
-                    }
+                pars.forEach(p => {
+                    const t = p.innerText?.trim();
+                    if (t && t.length > 20) texts.push(t);
                 });
-
                 return texts.join('\\n');
             }""")
-
             return content or ""
-
         except Exception as e:
-            self.logger.error(f"获取详情页失败: {url} - {e}")
+            self.logger.error(f"获取资讯页失败: {url} - {e}")
             return ""
 
-    def _clean_html_content(self, html: str) -> str:
-        """清理HTML内容"""
+    def _fetch_report_content(self, page, url: str) -> str:
+        """获取研报详情页 - data.eastmoney.com/report"""
         try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, 'html.parser')
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(1500)
 
-            # 移除script和style
-            for script in soup(['script', 'style']):
-                script.decompose()
+            content = page.evaluate("""() => {
+                const selectors = [
+                    '.report-content',
+                    '.content-detail',
+                    '#ContentBody',
+                    '.research-report',
+                    '.article-content',
+                    '.main-content',
+                ];
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        const text = el.innerText?.trim();
+                        if (text && text.length > 100) return text;
+                    }
+                }
+                return document.body.innerText?.trim() || '';
+            }""")
+            return content or ""
+        except Exception as e:
+            self.logger.error(f"获取研报页失败: {url} - {e}")
+            return ""
 
-            # 获取文本
-            text = soup.get_text(separator='\n', strip=True)
+    def _fetch_caifuhao_content(self, page, url: str) -> str:
+        """获取财富号文章详情页 - caifuhao.eastmoney.com"""
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(1500)
 
-            # 清理多余空行
-            lines = [line.strip() for line in text.split('\n') if line.strip()]
-            return '\n'.join(lines)
-        except ImportError:
-            # 如果没有 bs4，简单清理
-            import re
-            text = re.sub(r'<[^>]+>', '', html)
-            lines = [line.strip() for line in text.split('\n') if line.strip()]
-            return '\n'.join(lines)
+            content = page.evaluate("""() => {
+                const selectors = [
+                    '.article-content',
+                    '.post-content',
+                    '.content-detail',
+                    '#article-content',
+                    'article',
+                    '.main-content',
+                ];
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        const text = el.innerText?.trim();
+                        if (text && text.length > 100) return text;
+                    }
+                }
+                // 备用
+                const pars = document.querySelectorAll('p');
+                const texts = [];
+                pars.forEach(p => {
+                    const t = p.innerText?.trim();
+                    if (t && t.length > 20) texts.push(t);
+                });
+                return texts.join('\\n');
+            }""")
+            return content or ""
+        except Exception as e:
+            self.logger.error(f"获取财富号页失败: {url} - {e}")
+            return ""
 
-    def fetch(self) -> List[NewsItem]:
-        """采集数据"""
+    def fetch(self) -> list[NewsItem]:
+        """采集数据 - 遍历三个路由（资讯/研报/文章）"""
         all_items = []
 
         self.logger.info(f"开始采集东方财富网 - 关键词: {self.keywords}")
-        self.logger.info(self.logger_info)  # 打印时间窗口信息
+        self.logger.info(f"遍历路由: {[r['name'] for r in self.ROUTES.values()]}")
+        self.logger.info(self.logger_info)
 
         # 创建批次目录
         now = datetime.now()
@@ -406,46 +486,65 @@ class EastMoneyCrawler(BaseCrawler):
 
             try:
                 for keyword in self.keywords:
-                    self.logger.info(f"搜索关键词: {keyword}")
+                    for route_type in ['news', 'report', 'article']:
+                        route_name = self.ROUTES[route_type]['name']
+                        self.logger.info(f"[{route_name}] 搜索关键词: {keyword}")
 
-                    results = self._search_keyword(page, keyword)
+                        results = self._search_single_route(page, keyword, route_type)
 
-                    for news in results:
-                        url = news['url']
+                        # 过滤：关键词匹配 + 时间窗口
+                        filtered = []
+                        for item in results:
+                            if not self._matches_keywords(item['title']):
+                                self.logger.debug(f"[{route_name}] 关键词过滤: {item['title'][:50]}...")
+                                continue
+                            if not self._is_in_time_window(item['time']):
+                                self.logger.debug(f"[{route_name}] 时间过滤: {item['title'][:50]}... ({item['time']})")
+                                continue
+                            filtered.append(item)
 
-                        # 去重
-                        if url in self.seen_urls:
-                            continue
-                        self.seen_urls.add(url)
+                        self.logger.info(f"[{route_name}] 过滤后: {len(filtered)}/{len(results)} 条")
 
-                        self.logger.info(f"获取正文: {news['title'][:50]}...")
-                        content = self._fetch_content(page, url)
+                        for idx, news in enumerate(filtered):
+                            url = news['url']
 
-                        # 创建 NewsItem
-                        item = NewsItem(
-                            title=news['title'],
-                            date=self._parse_time(news['time']),
-                            url=url,
-                            source=self.source_name,
-                            source_code=self.source_code,
-                            credibility_tag=self.credibility_base,
-                            category=self._auto_classify(news['title']),
-                            summary=news['summary'] or news['title'][:150],
-                            content=content,
-                            raw_data={'keyword': keyword},
-                        )
+                            # 去重
+                            if url in self.seen_urls:
+                                continue
+                            self.seen_urls.add(url)
 
-                        # AI 摘要
-                        if content and len(content.strip()) > 50:
-                            ai_summary, summary_time = self.generate_summary(news['title'], content)
-                            if ai_summary:
-                                item.summary = ai_summary
-                                item.summary_generated_at = summary_time
+                            self.logger.info(f"[{route_name}] [{idx+1}/{len(filtered)}] 获取正文: {news['title'][:50]}...")
+                            content = self._fetch_content_by_url(page, url)
 
-                        all_items.append(item)
-                        time.sleep(1)
+                            # 创建 NewsItem
+                            item = NewsItem(
+                                title=news['title'],
+                                date=self._parse_time(news['time']),
+                                url=url,
+                                source=self.source_name,
+                                source_code=self.source_code,
+                                credibility_tag=f"{self.credibility_base}【{route_name}】",
+                                category=self._auto_classify(news['title']),
+                                summary=news['summary'] or news['title'][:150],
+                                content=content,
+                                raw_data={
+                                    'keyword': keyword,
+                                    'route_type': route_type,
+                                    'route_name': route_name,
+                                },
+                            )
 
-                    time.sleep(2)
+                            # AI 摘要
+                            if content and len(content.strip()) > 50:
+                                ai_summary, summary_time = self.generate_summary(news['title'], content)
+                                if ai_summary:
+                                    item.summary = ai_summary
+                                    item.summary_generated_at = summary_time
+
+                            all_items.append(item)
+                            time.sleep(1)
+
+                        time.sleep(2)
 
             finally:
                 context.close()
@@ -460,7 +559,7 @@ def main():
     import os
 
     # 支持环境变量配置时间窗口（默认24小时）
-    hours_window = int(os.getenv('EASTMONEY_HOURS_WINDOW', '24'))
+    hours_window = int(os.getenv('EASTMONEY_HOURS_WINDOW', '56'))
 
     crawler = EastMoneyCrawler(hours_window=hours_window)
     items = crawler.run()
@@ -475,7 +574,7 @@ def main():
         print(f"\n{'─'*70}")
         print(f"{i}. [{item.category}] {item.title}")
         print(f"   时间: {item.date}")
-        print(f"   链接: {item.url}")
+        print(f"   链接: {item.url}") 
 
         if item.summary:
             print(f"   AI摘要: {item.summary[:200]}...")
