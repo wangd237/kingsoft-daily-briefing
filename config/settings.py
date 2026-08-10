@@ -146,6 +146,13 @@ COLLECTORS = {
         'enable_summary': False,
         'api_key': '',  # 需要配置API密钥
     },
+    'zhidx': {
+        'enabled': True,
+        'name': '智东西',
+        'keywords': ['金山', 'WPS'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
 }
 
 # 分类关键词

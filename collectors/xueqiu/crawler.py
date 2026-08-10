@@ -29,7 +29,7 @@ class XueqiuCrawler(BaseCrawler):
 
     source_name = "雪球"
     source_code = "xueqiu"
-    credibility_base = "【投资者社区】"
+    credibility_base = "【媒体报道】"
 
     # 金山系股票列表
     STOCKS = [
@@ -40,7 +40,7 @@ class XueqiuCrawler(BaseCrawler):
 
     # Tab 配置
     TABS = [
-        {'key': 'news', 'name': '资讯', 'credibility': '【投资者社区】'},
+        {'key': 'news', 'name': '资讯', 'credibility': '【媒体报道】'},
         {'key': 'notice', 'name': '公告', 'credibility': '【官方公告】'},
     ]
 
