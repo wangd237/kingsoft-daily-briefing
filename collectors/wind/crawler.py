@@ -40,7 +40,7 @@ class WindCrawler(BaseCrawler):
 
     source_name = "Wind金融终端"
     source_code = "wind"
-    credibility_base = "【金融数据】"
+    credibility_base = "【媒体报道】"
 
     def __init__(self, enable_summary: bool = None, hours_window: int = 24):
         # 从配置读取参数
