@@ -135,14 +135,14 @@ COLLECTORS = {
         'enabled': True,
         'name': '雪球',
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
-        'credibility': '【投资者社区】',
+        'credibility': '【媒体报道】',
         'enable_summary': True,
     },
     'wind': {
         'enabled': False,  # Wind需要授权，默认禁用
         'name': 'Wind金融终端',
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
-        'credibility': '【金融数据】',
+        'credibility': '【媒体报道】',
         'enable_summary': False,
         'api_key': '',  # 需要配置API密钥
     },
