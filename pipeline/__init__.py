@@ -12,8 +12,9 @@ from typing import List
 from collections import defaultdict
 import json
 import os
+import re
 
-from models.news import NewsItem, DailyBriefing
+from models.news import NewsItem, DailyBriefing, CREDIBILITY_PRIORITY
 from config.settings import TIME_FILTER, BRIEFING_DIR
 
 
@@ -49,15 +50,18 @@ class DataPipeline:
 
             # 递归查找JSON文件
             for json_file in base_dir.rglob('*.json'):
-                # 检查日期
-                if date not in json_file.name:
-                    continue
-
                 try:
                     with open(json_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                        for item_data in data.get('items', []):
-                            items.append(NewsItem.from_dict(item_data))
+
+                    # 日期匹配：优先文件名，fallback 到 fetch_time
+                    fetch_time = data.get('fetch_time', '')
+                    fetch_date = fetch_time[:10].replace('-', '') if fetch_time else ''
+                    if date not in json_file.name and date != fetch_date:
+                        continue
+
+                    for item_data in data.get('items', []):
+                        items.append(NewsItem.from_dict(item_data))
                 except Exception as e:
                     print(f"加载文件失败 {json_file}: {e}")
 
@@ -71,33 +75,61 @@ class DataPipeline:
             items = self.items
 
         cutoff_time = datetime.now() - timedelta(hours=self.hours)
-        filtered = [item for item in items
-                   if item.publish_time and item.publish_time >= cutoff_time]
+        filtered = []
+        for item in items:
+            # publish_time 优先，fallback 到 date 字段解析
+            pub_time = item.publish_time
+            if pub_time is None and item.date:
+                try:
+                    pub_time = datetime.strptime(item.date, '%Y-%m-%d')
+                except ValueError:
+                    pass
+            if pub_time and pub_time >= cutoff_time:
+                filtered.append(item)
 
         print(f"时间过滤后(最近{self.hours}小时): {len(filtered)} 条")
         return filtered
 
+    @staticmethod
+    def _normalize_title(title: str) -> str:
+        """标题归一化：去掉所有标点/空格，只保留中文、字母、数字"""
+        return re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title.lower())
+
     def deduplicate(self, items: List[NewsItem]) -> List[NewsItem]:
-        """去重"""
-        seen_urls = set()
-        seen_titles = set()
-        unique_items = []
+        """
+        去重：URL 与归一化标题各自分组，同组内保留可信度最高的一条
+        （官方公告 > 官方资讯 > 媒体报道）
+        """
+        def better(a: NewsItem, b: NewsItem) -> NewsItem:
+            """返回可信度更高的一条，同级保留先出现的"""
+            pa = CREDIBILITY_PRIORITY.get(a.credibility_tag, 99)
+            pb = CREDIBILITY_PRIORITY.get(b.credibility_tag, 99)
+            return b if pb < pa else a
 
+        # 第一轮：按 URL 归并
+        by_url = {}
+        order = []
         for item in items:
-            # URL去重
-            if item.url in seen_urls:
-                continue
+            key = item.url
+            if key in by_url:
+                by_url[key] = better(by_url[key], item)
+            else:
+                by_url[key] = item
+                order.append(key)
 
-            # 标题归一化去重
-            import hashlib
-            norm_title = item.title.lower().replace(' ', '').replace('：', '')
-            title_hash = hashlib.md5(norm_title.encode()).hexdigest()
-            if title_hash in seen_titles:
-                continue
+        # 第二轮：按归一化标题归并（跨源同一篇报道）
+        by_title = {}
+        title_order = []
+        for key in order:
+            item = by_url[key]
+            tkey = self._normalize_title(item.title)
+            if tkey in by_title:
+                by_title[tkey] = better(by_title[tkey], item)
+            else:
+                by_title[tkey] = item
+                title_order.append(tkey)
 
-            seen_urls.add(item.url)
-            seen_titles.add(title_hash)
-            unique_items.append(item)
+        unique_items = [by_title[k] for k in title_order]
 
         print(f"去重后: {len(unique_items)} 条")
         return unique_items
