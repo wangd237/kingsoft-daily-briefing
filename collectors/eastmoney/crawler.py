@@ -523,7 +523,7 @@ class EastMoneyCrawler(BaseCrawler):
                                 url=url,
                                 source=self.source_name,
                                 source_code=self.source_code,
-                                credibility_tag=f"{self.credibility_base}【{route_name}】",
+                                credibility_tag=self.credibility_base,
                                 category=self._auto_classify(news['title']),
                                 summary=news['summary'] or news['title'][:150],
                                 content=content,
