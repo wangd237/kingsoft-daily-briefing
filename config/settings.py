@@ -153,6 +153,20 @@ COLLECTORS = {
         'credibility': '【媒体报道】',
         'enable_summary': True,
     },
+    'gamelook': {
+        'enabled': True,
+        'name': 'GameLook',
+        'keywords': ['金山', '西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
+    'gamersky': {
+        'enabled': True,
+        'name': '游民星空',
+        'keywords': ['西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
 }
 
 # 分类关键词
