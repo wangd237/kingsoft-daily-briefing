@@ -246,10 +246,18 @@ class GamerskyCrawler(BaseCrawler):
             page.wait_for_timeout(2000)
 
             # 步骤2：查找并点击搜索框
+            # 搜索框特征：<input class="Sinput" type="text" name="s" placeholder="" autocomplete="new-password">
             self.logger.info(f"[{keyword}] 查找搜索框")
-            search_input = page.locator('input[placeholder*="搜索"], input[type="text"]').first
 
-            if search_input.count() == 0:
+            # 先尝试点击搜索区域展开（如果搜索框默认收起）
+            search_form = page.locator('#search-form, .Search').first
+            if search_form.count() > 0:
+                search_form.click()
+                page.wait_for_timeout(500)
+
+            search_input = page.locator('input.Sinput[name="s"]').first
+
+            if search_input.count() == 0 or not search_input.is_visible():
                 # 尝试直接访问搜索结果页
                 self.logger.info(f"[{keyword}] 未找到搜索框，直接访问搜索结果页")
                 encoded_keyword = quote(keyword)
@@ -259,39 +267,20 @@ class GamerskyCrawler(BaseCrawler):
             else:
                 # 输入关键词并搜索
                 self.logger.info(f"[{keyword}] 输入关键词并搜索")
+                search_input.click()
+                page.wait_for_timeout(300)
                 search_input.fill(keyword)
                 page.wait_for_timeout(500)
                 search_input.press('Enter')
                 page.wait_for_timeout(3000)
 
-            # 步骤3：点击"新闻资讯"的"更多"链接
-            self.logger.info(f"[{keyword}] 查找新闻资讯的'更多'链接")
-
-            # 先查找包含"新闻资讯"的区域
-            news_section = page.locator('div.tit:has-text("新闻资讯")').first
-
-            if news_section.count() > 0:
-                # 在该区域内查找"更多"链接
-                more_link = news_section.locator('..').locator('a:has-text("更多")').first
-
-                if more_link.count() > 0:
-                    self.logger.info(f"[{keyword}] 点击新闻资讯的'更多'链接")
-                    more_link.click()
-                    page.wait_for_timeout(3000)
-                else:
-                    # 尝试直接构造新闻列表页URL
-                    self.logger.info(f"[{keyword}] 未找到'更多'链接，直接访问新闻列表页")
-                    encoded_keyword = quote(keyword)
-                    news_url = f"{self.search_base_url}/all/news?s={encoded_keyword}"
-                    page.goto(news_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(2000)
-            else:
-                # 尝试直接构造新闻列表页URL
-                self.logger.info(f"[{keyword}] 未找到新闻资讯区域，直接访问新闻列表页")
-                encoded_keyword = quote(keyword)
-                news_url = f"{self.search_base_url}/all/news?s={encoded_keyword}"
-                page.goto(news_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(2000)
+            # 步骤3：进入新闻列表页
+            # 搜索结果页有"资讯"标签，链接格式：//so.gamersky.com/all/news?s=关键词
+            self.logger.info(f"[{keyword}] 进入新闻列表页")
+            encoded_keyword = quote(keyword)
+            news_url = f"{self.search_base_url}/all/news?s={encoded_keyword}"
+            page.goto(news_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
 
             # 截图调试
             try:
@@ -398,7 +387,7 @@ class GamerskyCrawler(BaseCrawler):
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=False)
             context = browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
