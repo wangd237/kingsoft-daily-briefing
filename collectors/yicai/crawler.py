@@ -373,8 +373,8 @@ def main():
     """测试运行"""
     import os
 
-    # 支持环境变量配置时间窗口（默认36小时，可配置为72小时等）
-    hours_window = int(os.getenv('YICAI_HOURS_WINDOW', '36'))  # 默认36小时，便于测试
+    # 支持环境变量配置时间窗口（默认24小时）
+    hours_window = int(os.getenv('YICAI_HOURS_WINDOW', '24'))  # 默认24小时，便于测试
 
     crawler = YicaiCrawler(hours_window=hours_window)
     items = crawler.run()
