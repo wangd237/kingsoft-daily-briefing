@@ -28,18 +28,27 @@ class HKEXCrawler(BaseCrawler):
     source_code = "hkex"
     credibility_base = "【官方公告】"
 
-    def __init__(self, stock_code: str = "03888", max_items: int = 5, enable_summary: bool | None = None):
+    def __init__(self, stock_codes: list[str] | None = None, hours_window: int = 24, enable_summary: bool | None = None):
         """
         初始化
 
         Args:
-            stock_code: 股票代码（03888 或 03896）
-            max_items: 最多抓取几条公告（默认5条）
+            stock_codes: 股票代码列表（默认 ['03888', '03896']）
+            hours_window: 只保留最近 N 小时的数据（默认24小时）
             enable_summary: 是否启用 AI 摘要（默认从配置读取）
         """
-        self.stock_code = stock_code
-        self.stock_name = "金山软件" if stock_code == "03888" else "金山云"
-        self.max_items = max_items
+        self.stock_codes = stock_codes or ['03888', '03896']
+        self.hours_window = hours_window
+
+        # 计算截止时间
+        self.cutoff_time = datetime.now() - timedelta(hours=hours_window)
+        self.logger_info = f"时间窗口: 过去{hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
+
+        # 股票代码到名称的映射
+        self.stock_names = {
+            '03888': '金山软件',
+            '03896': '金山云'
+        }
 
         # 从配置读取 enable_summary，未设置则默认为 True
         hkex_config = COLLECTORS.get('hkex', {})
@@ -66,12 +75,13 @@ class HKEXCrawler(BaseCrawler):
             return max(scores, key=lambda k: scores[k])
         return "资本动态"
 
-    def _extract_pdf_content(self, pdf_url: str, cookies: list | None = None, referer: str | None = None) -> tuple[str | None, str | None]:
+    def _extract_pdf_content(self, pdf_url: str, stock_code: str, cookies: list | None = None, referer: str | None = None) -> tuple[str | None, str | None]:
         """
         从 PDF URL 下载并提取内容
 
         Args:
             pdf_url: PDF 文件链接
+            stock_code: 股票代码
             cookies: 浏览器 cookies
             referer: Referer 头
 
@@ -93,7 +103,7 @@ class HKEXCrawler(BaseCrawler):
             download_dir = self.pdf_processor._get_download_dir()
 
             # 构建保存路径
-            pdf_path = download_dir / f"{self.stock_code}_{file_id}.pdf"
+            pdf_path = download_dir / f"{stock_code}_{file_id}.pdf"
 
             # 如果已存在，直接提取文本
             if pdf_path.exists():
@@ -132,27 +142,37 @@ class HKEXCrawler(BaseCrawler):
             self.logger.error(f"PDF 处理失败: {e}")
             return None, None
 
-    def fetch(self) -> list[NewsItem]:
-        """采集公告数据（下载 PDF 并解析）"""
+    def _fetch_single_stock(self, stock_code: str) -> list[NewsItem]:
+        """
+        采集单个股票的公告数据（下载 PDF 并解析）
+
+        Args:
+            stock_code: 股票代码（03888 或 03896）
+
+        Returns:
+            该股票的 NewsItem 列表
+        """
         from playwright.sync_api import sync_playwright
         import os
 
         items = []
+        stock_name = self.stock_names.get(stock_code, '未知')
 
-        self.logger.info(f"开始采集港交所 - 股票: {self.stock_code} ({self.stock_name}), 计划采集: {self.max_items}条")
+        self.logger.info(f"开始采集港交所 - 股票: {stock_code} ({stock_name})")
 
-        # 创建批次目录
-        now = datetime.now()
-        date_dir = now.strftime('%Y/%m/%d')
-        batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
-        self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
-        os.makedirs(self._batch_dir, exist_ok=True)
-        self.logger.info(f"批次目录: {self._batch_dir}")
+        # 创建批次目录（只在第一次调用时创建）
+        if not self._batch_dir:
+            now = datetime.now()
+            date_dir = now.strftime('%Y/%m/%d')
+            batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
+            self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
+            os.makedirs(self._batch_dir, exist_ok=True)
+            self.logger.info(f"批次目录: {self._batch_dir}")
 
-        # 设置 PDF 下载目录为批次目录下的 pdfs 子目录
-        if self.pdf_processor:
-            pdf_dir = os.path.join(self._batch_dir, "pdfs")
-            self.pdf_processor.set_download_dir(pdf_dir)
+            # 设置 PDF 下载目录为批次目录下的 pdfs 子目录
+            if self.pdf_processor:
+                pdf_dir = os.path.join(self._batch_dir, "pdfs")
+                self.pdf_processor.set_download_dir(pdf_dir)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -177,31 +197,44 @@ class HKEXCrawler(BaseCrawler):
                 self._random_delay(2, 4)
 
                 # 截图查看初始页面
-                page.screenshot(path=f"output/logs/hkex_{self.stock_code}_step1_initial.png")
+                page.screenshot(path=f"output/logs/hkex_{stock_code}_step1_initial.png")
 
-                # 等待搜索框加载并使用 Playwright 原生方法填充
+                # 等待搜索框加载并选择股票
                 stock_input = page.locator("input#searchStockCode")
                 stock_input.wait_for(state="visible", timeout=15000)
-                stock_input.fill(self.stock_code)
-                self.logger.info(f"已填充股票代码: {self.stock_code}")
+
+                # 清空并填充股票代码
+                stock_input.clear()
+                stock_input.fill(stock_code)
+                self.logger.info(f"已填充股票代码: {stock_code}")
 
                 # 等待下拉选项出现并选择（自动完成组件）
                 try:
                     # 等待下拉框出现，选择第一个有效选项（排除"更多"）
                     dropdown_option = page.locator(".autocomplete-suggestion:not(.suggestion-viewall)").first
-                    dropdown_option.wait_for(state="visible", timeout=3000)
+                    dropdown_option.wait_for(state="visible", timeout=5000)
                     dropdown_option.click()
-                    self.logger.info(f"已选择股票: {self.stock_code} {self.stock_name}")
+                    self.logger.info(f"已选择股票: {stock_code} {stock_name}")
                 except Exception:
-                    # 如果下拉框没出现，尝试按回车确认
-                    stock_input.press("Enter")
-                    self.logger.info("按回车确认股票代码")
+                    # 如果下拉框没出现，尝试通过 JavaScript 直接设置并触发搜索
+                    self.logger.warning("下拉框未出现，尝试通过 JS 触发搜索")
+                    page.evaluate("""(stockCode) => {
+                        const input = document.querySelector('input#searchStockCode');
+                        if (input) {
+                            input.value = stockCode;
+                            input.dispatchEvent(new Event('change', { bubbles: true }));
+                            input.dispatchEvent(new Event('input', { bubbles: true }));
+                            // 触发搜索按钮点击
+                            const searchBtn = document.querySelector('a.filter__btn-applyFilters-js');
+                            if (searchBtn) searchBtn.click();
+                        }
+                    }""", stock_code)
 
                 # 随机延时
                 self._random_delay(1, 2)
 
                 # 截图查看填充后
-                page.screenshot(path=f"output/logs/hkex_{self.stock_code}_step2_filled.png")
+                page.screenshot(path=f"output/logs/hkex_{stock_code}_step2_filled.png")
 
                 # 设置开始日期为10天前
                 self._set_date_range(page, days_back=10)
@@ -224,7 +257,7 @@ class HKEXCrawler(BaseCrawler):
                 self._random_delay(2, 3)
 
                 # 截图查看搜索结果
-                page.screenshot(path=f"output/logs/hkex_{self.stock_code}_step3_results.png")
+                page.screenshot(path=f"output/logs/hkex_{stock_code}_step3_results.png")
 
                 # 获取 cookies 用于 PDF 下载
                 cookies = context.cookies()
@@ -297,12 +330,14 @@ class HKEXCrawler(BaseCrawler):
                 raw_items = results.get('items', [])
                 self.logger.info(f"找到 {len(raw_items)} 条数据")
 
-                # 限制数量，逐个处理
-                raw_items = raw_items[:self.max_items]
-
                 # 去重处理
                 seen_titles = set()
                 invalid_words = ['Search', 'Guide', 'Help', 'Disclaimer']
+
+                # 去重处理 + 时间过滤
+                seen_titles = set()
+                invalid_words = ['Search', 'Guide', 'Help', 'Disclaimer']
+                filtered_results = []
 
                 for idx, news in enumerate(raw_items, 1):
                     title = news.get('title', '')
@@ -319,26 +354,45 @@ class HKEXCrawler(BaseCrawler):
 
                     seen_titles.add(title)
 
-                    self.logger.info(f"[{idx}/{len(raw_items)}] 处理: {title[:50]}...")
+                    # 解析日期时间（用于时间过滤）
+                    parsed_datetime = self._parse_hkex_datetime(date)
 
-                    # 解析日期（兼容 DD/MM/YYYY 港交所格式）
+                    # 时间过滤：检查是否在时间窗口内（采集阶段过滤，避免浪费资源）
+                    if parsed_datetime and parsed_datetime < self.cutoff_time:
+                        self.logger.debug(f"[{stock_code}] 时间过滤: {title[:50]}... (时间: {date})")
+                        continue
+
+                    filtered_results.append(news)
+
+                self.logger.info(f"[{stock_code}] 过滤后: {len(filtered_results)}/{len(raw_items)} 条")
+
+                for idx, news in enumerate(filtered_results, 1):
+                    title = news.get('title', '')
+                    url = news.get('url', '')
+                    date = news.get('date', '')
+
+                    self.logger.info(f"[{idx}/{len(filtered_results)}] 处理: {title[:50]}...")
+
+                    # 解析日期为 YYYY-MM-DD 格式
                     parsed_date = self._parse_hkex_date(date)
+                    parsed_datetime = self._parse_hkex_datetime(date)
 
                     # 创建基础 NewsItem
                     item = NewsItem(
-                        title=f"{self.stock_name}: {title}",
+                        title=f"{stock_name}: {title}",
                         date=parsed_date,
                         url=url,
-                        source=f"港交所-{self.stock_name}",
-                        source_code=f"hkex_{self.stock_code}",
+                        source=f"港交所-{stock_name}",
+                        source_code=f"hkex_{stock_code}",
                         credibility_tag=self.credibility_base,
                         category=self._auto_classify(title),
+                        publish_time=parsed_datetime,
                     )
 
                     # 下载并解析 PDF（带上 cookies 和 referer）
                     if url and self.pdf_processor:
                         self.logger.info(f"  正在下载 PDF...")
-                        pdf_path, content = self._extract_pdf_content(url, cookies=cookies, referer=current_url)
+                        pdf_path, content = self._extract_pdf_content(url, stock_code, cookies=cookies, referer=current_url)
 
                         if pdf_path and content:
                             item.content = content
@@ -370,7 +424,7 @@ class HKEXCrawler(BaseCrawler):
                     self._random_delay(1, 2)
 
                 # 最终截图
-                page.screenshot(path=f"output/logs/hkex_{self.stock_code}_final.png")
+                page.screenshot(path=f"output/logs/hkex_{stock_code}_final.png")
                 self.logger.info("截图已保存")
 
             except Exception as e:
@@ -379,8 +433,93 @@ class HKEXCrawler(BaseCrawler):
                 context.close()
                 browser.close()
 
-        self.logger.info(f"采集完成: {len(items)} 条（含 PDF 和摘要）")
+        self.logger.info(f"股票 {stock_code} 采集完成: {len(items)} 条")
         return items
+
+    def fetch(self) -> list[NewsItem]:
+        """
+        采集所有股票的公告数据
+        循环采集 self.stock_codes 中定义的所有股票
+        """
+        import os
+
+        all_items = []
+
+        self.logger.info(f"开始采集港交所 - 股票列表: {self.stock_codes}")
+
+        # 创建批次目录（只创建一次）
+        now = datetime.now()
+        date_dir = now.strftime('%Y/%m/%d')
+        batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
+        self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
+        os.makedirs(self._batch_dir, exist_ok=True)
+        self.logger.info(f"批次目录: {self._batch_dir}")
+
+        # 设置 PDF 下载目录为批次目录下的 pdfs 子目录
+        if self.pdf_processor:
+            pdf_dir = os.path.join(self._batch_dir, "pdfs")
+            self.pdf_processor.set_download_dir(pdf_dir)
+
+        # 循环采集每个股票
+        for stock_code in self.stock_codes:
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"开始采集股票: {stock_code}")
+            self.logger.info('='*60)
+
+            items = self._fetch_single_stock(stock_code)
+            all_items.extend(items)
+
+            self.logger.info(f"股票 {stock_code} 采集完成，当前总计: {len(all_items)} 条")
+
+        # 时间过滤（二次检查，采集阶段已过滤大部分）
+        if self.hours_window > 0:
+            before_count = len(all_items)
+            all_items = self._filter_by_time(all_items)
+            if len(all_items) < before_count:
+                self.logger.info(f"时间过滤: {len(all_items)}/{before_count} 条")
+
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info(f"港交所所有股票采集完成: 共 {len(all_items)} 条")
+        self.logger.info('='*60)
+
+        return all_items
+
+    def _filter_by_time(self, items: list[NewsItem]) -> list[NewsItem]:
+        """
+        过滤保留时间窗口内的数据
+        使用 publish_time（精确到分钟）进行过滤，而不是仅比较日期
+
+        Args:
+            items: 采集的新闻列表
+
+        Returns:
+            过滤后的列表
+        """
+        filtered = []
+
+        for item in items:
+            # 优先使用 publish_time（精确时间），其次使用 date（仅日期）
+            item_datetime = item.publish_time
+
+            if item_datetime is None and item.date:
+                # 如果没有 publish_time，尝试从 date 解析
+                try:
+                    item_datetime = datetime.strptime(item.date, '%Y-%m-%d')
+                except ValueError:
+                    item_datetime = None
+
+            if item_datetime is None:
+                # 无时间信息，保留数据（宁可多采）
+                filtered.append(item)
+                continue
+
+            # 精确时间比较
+            if item_datetime >= self.cutoff_time:
+                filtered.append(item)
+            else:
+                self.logger.debug(f"时间过滤跳过: {item.title[:30]}... (时间: {item_datetime})")
+
+        return filtered
 
     def _set_date_range(self, page, days_back: int = 10):
         """
@@ -440,23 +579,28 @@ class HKEXCrawler(BaseCrawler):
     def _parse_hkex_date(self, date_str: str) -> str:
         """
         解析港交所日期格式
-        兼容 DD/MM/YYYY 格式
+        兼容 DD/MM/YYYY HH:MM 格式（如：06/08/2026 18:30）
+        返回 YYYY-MM-DD 格式（用于 date 字段）
         """
         if not date_str:
             return ''
 
         date_str = date_str.strip()
 
-        # 尝试 DD/MM/YYYY 格式（港交所常用）
+        # 去除中文前缀 "發放時間:"（发放时间）
+        if '發放時間:' in date_str:
+            date_str = date_str.split('發放時間:')[-1].strip()
+
+        # 尝试 DD/MM/YYYY HH:MM 格式（港交所实际格式：06/08/2026 18:30）
         try:
-            dt = datetime.strptime(date_str, '%d/%m/%Y')
+            dt = datetime.strptime(date_str, '%d/%m/%Y %H:%M')
             return dt.strftime('%Y-%m-%d')
         except ValueError:
             pass
 
-        # 尝试 DD/MM/YYYY HH:MM 格式
+        # 尝试 DD/MM/YYYY 格式
         try:
-            dt = datetime.strptime(date_str, '%d/%m/%Y %H:%M')
+            dt = datetime.strptime(date_str, '%d/%m/%Y')
             return dt.strftime('%Y-%m-%d')
         except ValueError:
             pass
@@ -464,89 +608,75 @@ class HKEXCrawler(BaseCrawler):
         # 回退到基类解析
         return self._parse_time(date_str)
 
+    def _parse_hkex_datetime(self, date_str: str) -> datetime | None:
+        """
+        解析港交所日期时间为 datetime 对象（用于精确时间过滤）
+        支持 DD/MM/YYYY HH:MM 格式（如：06/08/2026 18:30）
+        返回 datetime 或 None
+        """
+        if not date_str:
+            return None
+
+        date_str = date_str.strip()
+
+        # 去除中文前缀 "發放時間:"（发放时间）
+        if '發放時間:' in date_str:
+            date_str = date_str.split('發放時間:')[-1].strip()
+
+        # 尝试 DD/MM/YYYY HH:MM 格式
+        try:
+            return datetime.strptime(date_str, '%d/%m/%Y %H:%M')
+        except ValueError:
+            pass
+
+        # 尝试 DD/MM/YYYY 格式（没时间则设为当天00:00）
+        try:
+            return datetime.strptime(date_str, '%d/%m/%Y')
+        except ValueError:
+            pass
+
+        # 尝试标准格式 YYYY-MM-DD
+        try:
+            return datetime.strptime(date_str, '%Y-%m-%d')
+        except ValueError:
+            pass
+
+        return None
+
 
 def main():
-    """测试运行 - 合并两个股票的采集结果到一个 JSON"""
-    import json
+    """测试运行 - 使用标准 run() 方法采集双股票数据"""
     import os
 
-    max_items = int(os.getenv('HKEX_MAX_ITEMS', '5'))
+    hours_window = int(os.getenv('HKEX_HOURS_WINDOW', '24'))  # 默认24小时
     enable_summary = os.getenv('HKEX_ENABLE_SUMMARY', 'true').lower() == 'true'
 
-    all_items = []
-    batch_dir = None
+    # 创建爬虫实例（自动采集双股票）
+    crawler = HKEXCrawler(hours_window=hours_window, enable_summary=enable_summary)
 
-    for code in ["03888", "03896"]:
-        print(f"\n{'='*70}")
-        print(f"采集股票代码: {code}")
-        print('='*70)
-
-        # 创建爬虫实例
-        crawler = HKEXCrawler(stock_code=code, max_items=max_items, enable_summary=enable_summary)
-
-        try:
-            # 只采集，不保存（通过直接调用 fetch 而不是 run）
-            crawler.logger.info(f"开始采集: {crawler.source_name}")
-            items = crawler.fetch()
-            crawler.logger.info(f"采集完成: {len(items)} 条")
-
-            # 保存第一个股票的批次目录，用于后续统一保存
-            if batch_dir is None and crawler._batch_dir:
-                batch_dir = crawler._batch_dir
-
-            # 添加到总列表
-            all_items.extend(items)
-
-            # 打印本次采集结果
-            for i, item in enumerate(items, 1):
-                print(f"\n{'─'*70}")
-                print(f"{i}. [{item.category}] {item.title}")
-                print(f"   日期: {item.date}")
-                print(f"   链接: {item.url}")
-
-                if item.raw_data and item.raw_data.get('pdf_path'):
-                    print(f"   PDF: {item.raw_data['pdf_path']}")
-                else:
-                    print(f"   PDF: [未下载]")
-
-                if item.summary:
-                    print(f"   AI摘要: {item.summary}")
-
-        except Exception as e:
-            crawler.logger.error(f"采集失败: {e}", exc_info=True)
-
-    # ========== 合并保存所有数据到一个 JSON ==========
-    if all_items and batch_dir:
-        print(f"\n{'='*70}")
-        print(f"合并保存: 共 {len(all_items)} 条数据")
-        print('='*70)
-
-        # 使用第一个股票的批次目录作为统一保存目录
-        # 修改批次名称为合并版本
-        merged_json_path = os.path.join(batch_dir, "hkex_merged_all_stocks.json")
-
-        # 构建保存数据
-        merged_data = {
-            'source': '港交所披露易',
-            'source_code': 'hkex',
-            'fetch_time': datetime.now().isoformat(),
-            'count': len(all_items),
-            'stocks': ['03888', '03896'],
-            'stock_names': ['金山软件', '金山云'],
-            'items': [item.to_dict() for item in all_items]
-        }
-
-        # 保存合并的 JSON
-        with open(merged_json_path, 'w', encoding='utf-8') as f:
-            json.dump(merged_data, f, ensure_ascii=False, indent=2)
-
-        print(f"✅ 合并数据已保存: {merged_json_path}")
-        print(f"   包含股票: 03888 (金山软件) + 03896 (金山云)")
-        print(f"   总条数: {len(all_items)}")
+    # 使用标准 run() 方法：采集 + 保存
+    items = crawler.run()
 
     print(f"\n{'='*70}")
-    print(f"港交所总采集结果: {len(all_items)} 条")
-    print("="*70)
+    print(f"港交所采集结果: {len(items)} 条")
+    print(f"时间窗口: 过去{hours_window}小时")
+    print(f"截止时间: {crawler.cutoff_time.strftime('%Y-%m-%d %H:%M')}")
+    # if hours_window == 24:
+    #     print("提示: 如需扩大时间窗口，设置环境变量 HKEX_HOURS_WINDOW=48")
+    print('='*70)
+
+    for i, item in enumerate(items, 1):
+        print(f"\n{'─'*70}")
+        print(f"{i}. [{item.category}] {item.title}")
+        print(f"   日期: {item.date}")
+        print(f"   链接: {item.url}")
+        print(f"   来源代码: {item.source_code}")
+
+        if item.raw_data and item.raw_data.get('pdf_path'):
+            print(f"   PDF: {item.raw_data['pdf_path']}")
+
+        if item.summary:
+            print(f"   AI摘要: {item.summary[:150]}...")
 
 
 if __name__ == "__main__":
