@@ -19,6 +19,7 @@ python -m collectors.hkex.crawler
 python -m collectors.zhidx.crawler
 python -m collectors.gamelook.crawler
 python -m collectors.gamersky.crawler
+python -m collectors.ali213.crawler
 
 # Run pipeline (generate briefing from collected data)
 python pipeline/__main__.py

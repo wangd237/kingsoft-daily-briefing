@@ -167,6 +167,13 @@ COLLECTORS = {
         'credibility': '【媒体报道】',
         'enable_summary': True,
     },
+    'ali213': {
+        'enabled': True,
+        'name': '游侠网',
+        'keywords': ['西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
+        'credibility': '【媒体报道】',
+        'enable_summary': True,
+    },
 }
 
 # 分类关键词
