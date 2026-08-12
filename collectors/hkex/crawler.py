@@ -9,7 +9,7 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import random
 
@@ -156,7 +156,7 @@ class HKEXCrawler(BaseCrawler):
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
-                headless=True,
+                headless= False,  # 可视化浏览器，便于调试
                 args=['--disable-blink-features=AutomationControlled', '--no-sandbox']
             )
 
@@ -185,23 +185,38 @@ class HKEXCrawler(BaseCrawler):
                 stock_input.fill(self.stock_code)
                 self.logger.info(f"已填充股票代码: {self.stock_code}")
 
+                # 等待下拉选项出现并选择（自动完成组件）
+                try:
+                    # 等待下拉框出现，选择第一个有效选项（排除"更多"）
+                    dropdown_option = page.locator(".autocomplete-suggestion:not(.suggestion-viewall)").first
+                    dropdown_option.wait_for(state="visible", timeout=3000)
+                    dropdown_option.click()
+                    self.logger.info(f"已选择股票: {self.stock_code} {self.stock_name}")
+                except Exception:
+                    # 如果下拉框没出现，尝试按回车确认
+                    stock_input.press("Enter")
+                    self.logger.info("按回车确认股票代码")
+
                 # 随机延时
                 self._random_delay(1, 2)
 
                 # 截图查看填充后
                 page.screenshot(path=f"output/logs/hkex_{self.stock_code}_step2_filled.png")
 
-                # 点击搜索按钮（纯 Class 定位，删除文本匹配）
+                # 设置开始日期为10天前
+                self._set_date_range(page, days_back=10)
+
+                # 点击搜索按钮（纯 Class 定位）
                 search_btn = page.locator('a.filter__btn-applyFilters-js').first
                 search_btn.wait_for(state="visible", timeout=10000)
                 search_btn.click()
                 self.logger.info("已点击搜索按钮")
 
-                # 等待搜索结果加载 - 等待表格出现（使用更通用的选择器）
+                # 等待搜索结果加载 - 等待表格出现（使用更精确的选择器）
                 self.logger.info("等待搜索结果加载...")
                 try:
-                    # 尝试多种表格选择器
-                    page.wait_for_selector("table tbody tr, .el-table__row, .search-result tr, [class*='table'] tr", timeout=30000)
+                    # 等待特定容器内的表格行出现
+                    page.wait_for_selector(".title-search-content table tbody tr[role='row']", timeout=30000)
                 except Exception as e:
                     self.logger.warning(f"等待表格超时: {e}")
 
@@ -215,17 +230,15 @@ class HKEXCrawler(BaseCrawler):
                 cookies = context.cookies()
                 current_url = page.url
 
-                # 提取公告列表 - 使用更通用的表格选择器
+                # 提取公告列表 - 使用精确的选择器
                 results = page.evaluate("""() => {
                     const data = [];
 
-                    // 尝试多种表格选择器
-                    let rows = document.querySelectorAll('.el-table__body tr.el-table__row');
+                    // 使用精确的表格行选择器
+                    let rows = document.querySelectorAll('.title-search-content table tbody tr[role="row"]');
                     if (rows.length === 0) {
+                        // 回退到通用选择器
                         rows = document.querySelectorAll('table tbody tr');
-                    }
-                    if (rows.length === 0) {
-                        rows = document.querySelectorAll('.search-result tbody tr, .result-table tbody tr');
                     }
 
                     console.log('Found rows:', rows.length);
@@ -368,6 +381,55 @@ class HKEXCrawler(BaseCrawler):
 
         self.logger.info(f"采集完成: {len(items)} 条（含 PDF 和摘要）")
         return items
+
+    def _set_date_range(self, page, days_back: int = 10):
+        """
+        设置搜索日期范围 - 移除 readonly 后直接填充日期
+
+        Args:
+            page: Playwright page 对象
+            days_back: 提前多少天（默认10天）
+        """
+        try:
+            # 计算目标日期
+            from datetime import timedelta
+            target_date = datetime.now() - timedelta(days=days_back)
+            date_str = target_date.strftime('%Y/%m/%d')
+
+            self.logger.info(f"设置开始日期为 {days_back} 天前: {date_str}")
+
+            # 等待输入框可见
+            date_from_input = page.locator("input#searchDate-From")
+            date_from_input.wait_for(state="visible", timeout=10000)
+
+            # 移除 readonly 后填充日期
+            result = page.evaluate("""(dateStr) => {
+                const input = document.querySelector('input#searchDate-From');
+                if (!input) return { success: false, error: 'Input not found' };
+
+                // 保存原始状态
+                const wasReadonly = input.hasAttribute('readonly');
+
+                // 移除 readonly，设置值，恢复 readonly
+                input.removeAttribute('readonly');
+                input.value = dateStr;
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.dispatchEvent(new Event('blur', { bubbles: true }));
+
+                if (wasReadonly) input.setAttribute('readonly', 'readonly');
+
+                return { success: true, value: input.value };
+            }""", date_str)
+
+            if result.get('success'):
+                self.logger.info(f"开始日期已设置: {result.get('value')}")
+            else:
+                self.logger.warning(f"设置失败: {result.get('error')}")
+
+            self._random_delay(0.5, 1)
+
+        except Exception as e:
+            self.logger.warning(f"设置日期范围失败: {e}")
 
     def _random_delay(self, min_sec: float = 1.0, max_sec: float = 3.0):
         """随机延时防 IP 封禁"""
