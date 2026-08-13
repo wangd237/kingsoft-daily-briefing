@@ -220,7 +220,6 @@ class KingsoftIRCrawler(BaseCrawler):
             content = content.replace(phrase, ' ')
 
         # 移除看起来像PDF文件名的内容 (如 HKEX-EPS_20260728_12259563_0)
-        import re
         content = re.sub(r'HKEX-EPS_\d+_\d+_\d+', ' ', content)
         content = re.sub(r'\S+\.pdf\b', ' ', content, flags=re.IGNORECASE)
 
@@ -235,7 +234,6 @@ class KingsoftIRCrawler(BaseCrawler):
             return ""
 
         # 移除HTML标签（如果有）
-        import re
         content = re.sub(r'<[^>]+>', '', content)
 
         # 清理多余空白
@@ -275,8 +273,6 @@ class KingsoftIRCrawler(BaseCrawler):
         """
         if not text:
             return ""
-
-        import re
 
         # 模式1：PDF文件名 HKE-EPS_20260728_12259563_0 或 HKE -EPS_20260612_12201116_0
         # 注意：实际文本中可能是 "HKE -EPS_20260612" 有空格
@@ -417,6 +413,7 @@ class KingsoftIRCrawler(BaseCrawler):
             return datetime(year, month, day)
 
         # 解析失败，返回当前时间（保留数据）
+        self.logger.warning(f"日期解析失败，使用当前时间作为fallback。输入: '{time_str[:50] if time_str else '<空>'}'")
         return now
 
     def _is_in_time_window(self, time_str: str) -> bool:
@@ -424,8 +421,9 @@ class KingsoftIRCrawler(BaseCrawler):
         try:
             parsed_time = self._parse_kingsoft_time(time_str)
             return parsed_time >= self.cutoff_time
-        except Exception:
+        except Exception as e:
             # 解析失败默认保留
+            self.logger.debug(f"时间窗口判断异常，默认保留数据。输入: '{time_str[:50] if time_str else '<空>'}', 错误: {e}")
             return True
 
     def _auto_classify(self, title: str) -> str:
@@ -1088,8 +1086,6 @@ class KingsoftIRCrawler(BaseCrawler):
         采集新闻活动四个栏目数据（支持PDF附件下载和AI摘要）
         使用全量采集 + 时间过滤机制
         """
-        import os
-
         items = []
 
         self.logger.info(f"开始采集金山软件IR官网")
@@ -1254,7 +1250,10 @@ class KingsoftIRCrawler(BaseCrawler):
                         if (not final_date or not self._parse_time(final_date)) and (final_content or summary):
                             extracted = self._extract_date_from_content(final_content + ' ' + summary)
                             if extracted:
+                                self.logger.info(f"  从内容中提取到日期: {extracted}")
                                 final_date = extracted
+                            else:
+                                self.logger.warning(f"  日期解析失败，使用fallback。列表页日期: '{list_date[:30] if list_date else '<空>'}', 详情页日期: '{date_from_detail[:30] if date_from_detail else '<空>'}'")
 
                         # 构建 raw_data
                         raw_data = {
@@ -1301,8 +1300,6 @@ class KingsoftIRCrawler(BaseCrawler):
 
 def main():
     """测试运行"""
-    import os
-
     # 支持环境变量配置时间窗口（默认48小时）
     hours_window = int(os.getenv('KINGSOFT_IR_HOURS_WINDOW', '48'))
 
