@@ -35,6 +35,7 @@ COLLECTORS = {
         'org_id': '9900035303',
         'credibility': '【官方公告】',
         'enable_summary': True,  # 启用 AI 摘要
+        'hours_window': 24,  # 时间窗口：24小时
     },
     'hkex': {
         'enabled': False,  # 待实现
@@ -52,6 +53,13 @@ COLLECTORS = {
         'credibility': '【官方公告】',
         'enable_summary': True,  # 启用 AI 摘要
     },
+    'kingsoft_office_ir': {
+        'enabled': True,
+        'name': '金山办公IR官网',
+        'credibility': '【官方公告】',
+        'enable_summary': True,
+        'hours_window': 24,  # 时间窗口：24小时
+    },
     'wechat': {
         'enabled': False,  # 待实现
         'name': '微信公众号',
@@ -66,11 +74,23 @@ COLLECTORS = {
         'enable_summary': False,
     },
     'weibo': {
-        'enabled': False,
-        'name': '官方微博',
-        'accounts': [],
+        'enabled': True,
+        'name': '微博',
         'credibility': '【官方资讯】',
-        'enable_summary': False,
+        'enable_summary': True,
+        'hours_window': 24,
+        'accounts': [
+            # 官方账号
+            {'uid': '2656274875', 'name': '金山软件', 'type': '官方'},
+            {'uid': '1896634750', 'name': '金山办公', 'type': '官方'},
+            {'uid': '1773314837', 'name': '金山云', 'type': '官方'},
+            {'uid': '1667468340', 'name': '西山居游戏', 'type': '官方'},
+            {'uid': '1894770763', 'name': '剑网3', 'type': '官方'},
+            {'uid': '7823846355', 'name': '尘白禁区', 'type': '官方'},
+            # 个人账号（制作人）
+            {'uid': '1730016180', 'name': '余玉贤', 'type': '个人'},
+            {'uid': '2093537363', 'name': '邓毅', 'type': '个人'},
+        ],
     },
     'media': {
         'enabled': False,
@@ -95,6 +115,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,  # 时间窗口：24小时
     },
     'kr36': {
         'enabled': True,
@@ -102,6 +123,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS AI'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,  # 时间窗口：24小时
     },
     'yicai': {
         'enabled': True,
