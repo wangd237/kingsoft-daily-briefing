@@ -7,12 +7,13 @@ import sys
 import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urljoin
 from typing import List
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 import re
+import os
 
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
@@ -31,9 +32,16 @@ class KingsoftIRCrawler(BaseCrawler):
     source_code = "kingsoft_ir"
     credibility_base = "【官方公告】"
 
-    def __init__(self, enable_summary: bool = None):
-        # 从配置读取 enable_summary
+    def __init__(self, enable_summary: bool = None, hours_window: int = None):
+        # 从配置读取参数
         config = COLLECTORS.get('kingsoft_ir', {})
+
+        # 时间窗口（默认48小时，港交所公告通常需要更长时间）
+        self.hours_window = hours_window or config.get('hours_window', 48)
+        self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
+        self.logger_info = f"时间窗口: 过去{self.hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
+
+        # 从配置读取 enable_summary
         if enable_summary is None:
             enable_summary = config.get('enable_summary', False)
 
@@ -47,21 +55,20 @@ class KingsoftIRCrawler(BaseCrawler):
 
         super().__init__(enable_summary=enable_summary)
         self.base_url = "https://ir.kingsoft.com"
+
+        # 栏目配置：移除 limit，全量采集后按时间过滤
         self.sections = [
             {
                 "name": "公告",
                 "url": "https://ir.kingsoft.com/zh-hant/news-events/announcements",
-                "limit": 5,
             },
             {
                 "name": "新聞稿",
                 "url": "https://ir.kingsoft.com/zh-hant/news-events/press-releases",
-                "limit": 2,
             },
             {
                 "name": "投資者活動",
                 "url": "https://ir.kingsoft.com/zh-hant/news-events/event-calendar",
-                "limit": 2,
             },
         ]
 
@@ -340,6 +347,87 @@ class KingsoftIRCrawler(BaseCrawler):
 
         return ""
 
+    def _parse_kingsoft_time(self, time_str: str) -> datetime:
+        """
+        解析金山IR的时间格式
+        支持: "2025-08-12", "2025/08/12", "08/12/2025", "2025年8月12日",
+              "27 May 2026", "5/27/26", "2026-05-27T00:00:00"
+        """
+        if not time_str:
+            return datetime.now()
+
+        time_str = time_str.strip()
+        now = datetime.now()
+
+        # 处理 ISO 格式 2026-05-27T00:00:00
+        match = re.search(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})', time_str)
+        if match:
+            year, month, day, hour, minute, second = map(int, match.groups())
+            return datetime(year, month, day, hour, minute, second)
+
+        # 处理 YYYY-MM-DD 或 YYYY/MM/DD
+        match = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', time_str)
+        if match:
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return datetime(year, month, day)
+
+        # 处理 YYYY年MM月DD日（中文格式）
+        match = re.search(r'(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日', time_str)
+        if match:
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return datetime(year, month, day)
+
+        # 处理英文格式 "27 May 2026" 或 "May 27, 2026"
+        month_map = {
+            'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+            'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7,
+            'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+
+        # 格式: "27 May 2026" 或 "27 May 2026"
+        match = re.search(r'(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{4})', time_str, re.IGNORECASE)
+        if match:
+            day = int(match.group(1))
+            month = month_map.get(match.group(2).lower()[:3], 1)
+            year = int(match.group(3))
+            return datetime(year, month, day)
+
+        # 格式: "May 27, 2026"
+        match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2}),?\s+(\d{4})', time_str, re.IGNORECASE)
+        if match:
+            month = month_map.get(match.group(1).lower()[:3], 1)
+            day = int(match.group(2))
+            year = int(match.group(3))
+            return datetime(year, month, day)
+
+        # 处理美式日期 MM/DD/YY 或 MM/DD/YYYY
+        match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{2,4})', time_str)
+        if match:
+            month, day = int(match.group(1)), int(match.group(2))
+            year = int(match.group(3))
+            if len(str(year)) == 2:
+                year = 2000 + year if year < 50 else 1900 + year
+            return datetime(year, month, day)
+
+        # 处理 HKEX-EPS 文件名中的日期格式 HKEX-EPS_20260728
+        match = re.search(r'HKEX-EPS[_-]?(\d{4})(\d{2})(\d{2})', time_str, re.IGNORECASE)
+        if match:
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return datetime(year, month, day)
+
+        # 解析失败，返回当前时间（保留数据）
+        return now
+
+    def _is_in_time_window(self, time_str: str) -> bool:
+        """判断时间是否在规定时间窗口内"""
+        try:
+            parsed_time = self._parse_kingsoft_time(time_str)
+            return parsed_time >= self.cutoff_time
+        except Exception:
+            # 解析失败默认保留
+            return True
+
     def _auto_classify(self, title: str) -> str:
         """自动分类"""
         title_lower = title.lower()
@@ -456,10 +544,10 @@ class KingsoftIRCrawler(BaseCrawler):
             };
         }''')
 
-    def _fetch_section(self, page, section_name: str, url: str, limit: int) -> List[dict]:
+    def _fetch_section(self, page, section_name: str, url: str) -> List[dict]:
         """
         抓取单个栏目
-        不同栏目采用不同策略：
+        不同栏目采用不同策略，全量采集后按时间过滤
         - 公告：列表获取标题和详情链接，后续进入详情页提取HKEX-EPS PDF
         - 新闻稿：列表直接提取PDF链接（<a type="application/pdf">）
         - 投资者活动：列表获取详情链接，后续在详情页找PDF
@@ -487,11 +575,11 @@ class KingsoftIRCrawler(BaseCrawler):
 
             # 根据不同栏目采用不同提取策略
             if section_name == '公告':
-                return self._fetch_announcements(page, limit)
+                return self._fetch_announcements(page)
             elif section_name == '新聞稿':
-                return self._fetch_press_releases(page, limit)
+                return self._fetch_press_releases(page)
             elif section_name == '投資者活動':
-                return self._fetch_investor_events(page, limit)
+                return self._fetch_investor_events(page)
             else:
                 return []
 
@@ -499,10 +587,10 @@ class KingsoftIRCrawler(BaseCrawler):
             self.logger.warning(f"[{section_name}] 页面访问异常: {e}")
             return []
 
-    def _fetch_announcements(self, page, limit: int) -> List[dict]:
+    def _fetch_announcements(self, page) -> list[dict]:
         """
         公告栏目：从 iframe 中提取标题和详情链接
-        列表仅获取标题、详情 ID 链接
+        列表仅获取标题、详情 ID 链接，全量采集
         """
         contexts = [page] + list(page.frames[1:])
         best_result = {'items': [], 'pageTitle': '', 'url': '', 'itemCount': 0}
@@ -512,28 +600,67 @@ class KingsoftIRCrawler(BaseCrawler):
                 result = current_context.evaluate('''() => {
                     const data = [];
                     const seen = new Set();
+                    const debugInfo = { totalLinks: 0, withDate: 0, withoutDate: 0, dateSources: {} };
                     const links = Array.from(document.querySelectorAll('a[href*="GetPressRelease"]'));
+                    debugInfo.totalLinks = links.length;
 
                     const extractDateFromElement = (link) => {
-                        const row = link.closest('tr, .row, [class*="row"], .PressRelease-SingleLine-DataColumn');
-                        if (row) {
-                            const dateCell = row.querySelector('td:first-child, .date, [class*="date"]');
-                            if (dateCell) {
-                                return dateCell.textContent.trim();
+                        // 1. 优先：查找 PressRelease-NewsDate（金山IR公告栏目的标准日期元素）
+                        const newsDateEl = link.closest('.PressRelease-SingleLine-DataRow, .PressRelease, [class*="PressRelease"]')
+                                              ?.querySelector('.PressRelease-NewsDate');
+                        if (newsDateEl) {
+                            const dateText = newsDateEl.textContent.trim();
+                            if (dateText) {
+                                debugInfo.dateSources['PressRelease-NewsDate'] = (debugInfo.dateSources['PressRelease-NewsDate'] || 0) + 1;
+                                return dateText;
                             }
                         }
+
+                        // 2. 从行元素中查找日期单元格
+                        const row = link.closest('.PressRelease-SingleLine-DataRow, tr, .row, [class*="row"]');
+                        if (row) {
+                            // 优先查找日期容器内的日期
+                            const dateContainer = row.querySelector('.PressRelease-SingleLine-DateContainer, [class*="DateContainer"]');
+                            if (dateContainer) {
+                                const dateText = dateContainer.textContent.trim();
+                                if (dateText) {
+                                    debugInfo.dateSources['DateContainer'] = (debugInfo.dateSources['DateContainer'] || 0) + 1;
+                                    return dateText;
+                                }
+                            }
+                            // 备选：查找第一个单元格或带date类的元素
+                            const dateCell = row.querySelector('td:first-child, .date, [class*="date"]');
+                            if (dateCell) {
+                                const dateText = dateCell.textContent.trim();
+                                if (dateText) {
+                                    debugInfo.dateSources['dateCell'] = (debugInfo.dateSources['dateCell'] || 0) + 1;
+                                    return dateText;
+                                }
+                            }
+                        }
+
+                        // 3. 从容器元素中查找
                         const container = link.closest('li, article, .item, div[class*="PressRelease"]');
                         if (container) {
                             const dateEl = container.querySelector('.date, time, [class*="date"]');
                             if (dateEl) {
-                                return dateEl.getAttribute('datetime') || dateEl.textContent.trim();
+                                const dateText = dateEl.getAttribute('datetime') || dateEl.textContent.trim();
+                                if (dateText) {
+                                    debugInfo.dateSources['container'] = (debugInfo.dateSources['container'] || 0) + 1;
+                                    return dateText;
+                                }
                             }
                         }
+
+                        // 4. 从URL中提取日期
                         const url = link.href || '';
                         const dateMatch = url.match(/(\d{4})-?(\d{2})-?(\d{2})/);
                         if (dateMatch) {
+                            debugInfo.dateSources['url'] = (debugInfo.dateSources['url'] || 0) + 1;
                             return dateMatch[0];
                         }
+
+                        debugInfo.dateSources['none'] = (debugInfo.dateSources['none'] || 0) + 1;
                         return '';
                     };
 
@@ -544,11 +671,16 @@ class KingsoftIRCrawler(BaseCrawler):
                             return;
                         }
                         const date = extractDateFromElement(link);
+                        if (date) {
+                            debugInfo.withDate++;
+                        } else {
+                            debugInfo.withoutDate++;
+                        }
                         seen.add(href);
                         data.push({title, url: href, time: date, summary: '', type: 'announcement'});
                     });
 
-                    return {items: data, pageTitle: document.title, url: window.location.href, itemCount: data.length};
+                    return {items: data, pageTitle: document.title, url: window.location.href, itemCount: data.length, debugInfo};
                 }''')
 
                 if result and len(result.get('items', [])) > len(best_result.get('items', [])):
@@ -556,13 +688,22 @@ class KingsoftIRCrawler(BaseCrawler):
             except Exception as e:
                 self.logger.debug(f"[公告] 提取失败: {e}")
 
-        self.logger.info(f"[公告] 找到 {len(best_result.get('items', []))} 条公告")
-        return best_result.get('items', [])[:limit]
+        # 输出日期提取调试信息
+        if best_result.get('debugInfo'):
+            debug = best_result['debugInfo']
+            self.logger.debug(f"[公告] 日期提取统计: 总计链接={debug.get('totalLinks', 0)}, "
+                             f"有日期={debug.get('withDate', 0)}, 无日期={debug.get('withoutDate', 0)}")
+            if debug.get('dateSources'):
+                sources = ', '.join([f"{k}={v}" for k, v in debug['dateSources'].items()])
+                self.logger.debug(f"[公告] 日期来源分布: {sources}")
 
-    def _fetch_press_releases(self, page, limit: int) -> List[dict]:
+        self.logger.info(f"[公告] 找到 {len(best_result.get('items', []))} 条公告")
+        return best_result.get('items', [])
+
+    def _fetch_press_releases(self, page) -> list[dict]:
         """
         新闻稿栏目：列表 DOM 直接筛选 <a type="application/pdf">
-        直接提取PDF链接，并从列表容器中提取日期
+        直接提取PDF链接，并从列表容器中提取日期，全量采集
         """
         try:
             result = page.evaluate('''() => {
@@ -572,8 +713,8 @@ class KingsoftIRCrawler(BaseCrawler):
                 const extractDate = (text) => {
                     if (!text) return '';
                     const patterns = [
-                        /\\b(\\d{1,2})[\\/\\-](\\d{1,2})[\\/\\-](\\d{2,4})\\b/,
-                        /\\b(\\d{4})[\\/\\-](\\d{1,2})[\\/\\-](\\d{1,2})\\b/,
+                        /\\b(\\d{1,2})[\\/](\\d{1,2})[\\/](\\d{2,4})\\b/,
+                        /\\b(\\d{4})[\\/](\\d{1,2})[\\/](\\d{1,2})\\b/,
                         /\\b(\\d{1,2})\\s+(January|February|March|April|May|June|July|August|September|October|November|December)[a-z]*\\s+(\\d{4})\\b/i,
                         /(\\d{4})年(\\d{1,2})月(\\d{1,2})日/
                     ];
@@ -596,17 +737,29 @@ class KingsoftIRCrawler(BaseCrawler):
                     }
 
                     // 从父容器中提取日期
-                    const container = link.closest('article, li, tr, .item, .news-item, .press-release, [class*="item"], [class*="row"], div');
+                    let container = link.closest('article, li, tr, .item, .news-item, .press-release, [class*="item"], [class*="row"]');
+                    if (!container) {
+                        container = link.closest('div');
+                    }
                     let date = '';
+
                     if (container) {
-                        // 优先查找带 date 类的元素
-                        const dateEl = container.querySelector('.date, time, [class*="date"], [datetime]');
-                        if (dateEl) {
-                            date = dateEl.getAttribute('datetime') || dateEl.textContent.trim();
+                        // 1. 优先查找金山IR新闻稿专用日期元素（在整个文章容器内查找）
+                        const articleContainer = link.closest('article') || container;
+                        const newsDateEl = articleContainer.querySelector('.nir-widget--news--date-time');
+                        if (newsDateEl) {
+                            date = newsDateEl.textContent.trim();
                         }
-                        // 备选：从容器文本中正则提取
+                        // 2. 备选：通用日期选择器
                         if (!date) {
-                            date = extractDate(container.textContent || '');
+                            const dateEl = container.querySelector('.date, time, [class*="date"], [datetime]');
+                            if (dateEl) {
+                                date = dateEl.getAttribute('datetime') || dateEl.textContent.trim();
+                            }
+                        }
+                        // 3. 备选：从容器文本中正则提取
+                        if (!date) {
+                            date = extractDate(articleContainer.textContent || '');
                         }
                     }
 
@@ -633,81 +786,89 @@ class KingsoftIRCrawler(BaseCrawler):
                 for item in items:
                     item['type'] = 'press_release'
 
-            return items[:limit]
+            return items
         except Exception as e:
             self.logger.warning(f"[新聞稿] 提取失败: {e}")
             return []
 
-    def _fetch_investor_events(self, page, limit: int) -> List[dict]:
+    def _fetch_investor_events(self, page) -> list[dict]:
         """
-        投资者活动栏目：列表仅拿到活动详情页链接
-        标记类型，后续在详情页找PDF
+        投资者活动栏目：从列表中提取标题、链接和日期
+        使用专门的选择器提取日期，标记类型，后续在详情页找PDF，全量采集
         """
         try:
-            result = self._extract_items_from_context(page)
+            result = page.evaluate('''() => {
+                const data = [];
+                const seen = new Set();
+
+                // 金山IR投资者活动专用：查找文章列表
+                const articles = Array.from(document.querySelectorAll('article.node--nir-event--nir-widget-list, article.nir-widget-article, article.node--type-nir-event'));
+
+                const extractDate = (text) => {
+                    if (!text) return '';
+                    const patterns = [
+                        /\\b(\\d{1,2})[\\/](\\d{1,2})[\\/](\\d{2,4})\\b/,  // M/D/YY
+                        /\\b(\\d{4})[\\/](\\d{1,2})[\\/](\\d{1,2})\\b/,  // YYYY/MM/DD
+                        /\\b(\\d{1,2})\\s+(January|February|March|April|May|June|July|August|September|October|November|December)[a-z]*\\s+(\\d{4})\\b/i,
+                        /(\\d{4})年(\\d{1,2})月(\\d{1,2})日/
+                    ];
+                    for (const p of patterns) {
+                        const m = text.match(p);
+                        if (m) return m[0];
+                    }
+                    return '';
+                };
+
+                articles.forEach(article => {
+                    // 查找标题链接
+                    const link = article.querySelector('a[href*="/events/event-details/"], .nir-widgets--event--title a, .field-nir-event-title a');
+                    if (!link) return;
+
+                    const title = (link.textContent || '').trim().replace(/\\s+/g, ' ');
+                    const href = link.href || '';
+
+                    if (!title || title.length < 4 || seen.has(href)) {
+                        return;
+                    }
+
+                    // 1. 优先：专用日期选择器 nir-widget--event--date
+                    let date = '';
+                    const dateEl = article.querySelector('.nir-widget--event--date');
+                    if (dateEl) {
+                        date = dateEl.textContent.trim().replace(/\\s+/g, ' ');
+                        // 移除时间部分 (如 "7:00 PM HKT")
+                        date = date.split(/\\s+\\d{1,2}:\\d{2}/)[0].trim();
+                    }
+
+                    // 2. 备选：从文章文本正则提取
+                    if (!date) {
+                        date = extractDate(article.textContent || '');
+                    }
+
+                    seen.add(href);
+                    data.push({
+                        title,
+                        url: href,
+                        time: date,
+                        summary: '',
+                        type: 'investor_event'
+                    });
+                });
+
+                return {
+                    items: data,
+                    pageTitle: document.title,
+                    url: window.location.href,
+                    itemCount: data.length
+                };
+            }''')
+
             items = result.get('items', [])
-
-            for item in items:
-                item['type'] = 'investor_event'
-
             self.logger.info(f"[投資者活動] 找到 {len(items)} 条活动")
-            return items[:limit]
+            return items
         except Exception as e:
             self.logger.warning(f"[投資者活動] 提取失败: {e}")
             return []
-
-    def _extract_pdf_attachment(self, content: str, page) -> tuple:
-        """
-        从内容中提取 PDF 附件链接并下载
-
-        Returns:
-            (PDF本地路径, PDF文本内容)，无附件返回 (None, None)
-        """
-        if not self.pdf_processor or not content:
-            return None, None
-
-        # 检测 PDF 附件模式
-
-        # HKEX-EPS PDF 文件名模式
-        pdf_patterns = [
-            r'(HKEX-EPS[_-]\d{8}[_-]\d+[_-]\d+)\.?PDF?',
-            r'(HKEX-EPS[_-]\d{8}[_-]\d+[_-]\d+)',
-            r'href=["\']([^"\']*\.PDF)["\']',
-            r'href=["\']([^"\']*\.pdf)["\']',
-        ]
-
-        pdf_filename = None
-        for pattern in pdf_patterns:
-            match = re.search(pattern, content, re.IGNORECASE)
-            if match:
-                pdf_filename = match.group(1)
-                break
-
-        if not pdf_filename:
-            return None, None
-
-        # 尝试构建 PDF URL (港交所公告PDF通常在同一域名)
-        # 先从页面中获取可能的 PDF 链接
-        try:
-            pdf_links = page.evaluate('''() => {
-                const links = Array.from(document.querySelectorAll('a[href*=".PDF"], a[href*=".pdf"]'));
-                return links.map(a => a.href);
-            }''')
-
-            pdf_url = None
-            for link in pdf_links:
-                if pdf_filename.replace('_', '') in link.replace('_', '').upper():
-                    pdf_url = link
-                    break
-
-            # 如果没找到具体链接，尝试通用模式
-            if not pdf_url and pdf_filename.startswith('HKEX-EPS'):
-                # 港交所PDF通常格式: https://www1.hkexnews.hk/...
-                self.logger.debug(f"检测到HKEX公告PDF: {pdf_filename}")
-        except Exception as e:
-            self.logger.debug(f"提取PDF链接失败: {e}")
-
-        return None, None
 
     def _extract_hkex_pdf(self, page, url: str) -> tuple:
         """
@@ -922,17 +1083,19 @@ class KingsoftIRCrawler(BaseCrawler):
             self.logger.warning(f"提取活动PDF失败: {e}")
             return None, None, "", ""
 
-    def fetch(self, max_pages: int = 1) -> List[NewsItem]:
+    def fetch(self, max_pages: int = 1) -> list[NewsItem]:
         """
         采集新闻活动四个栏目数据（支持PDF附件下载和AI摘要）
+        使用全量采集 + 时间过滤机制
         """
         import os
 
         items = []
 
         self.logger.info(f"开始采集金山软件IR官网")
+        self.logger.info(self.logger_info)  # 打印时间窗口信息
 
-        # 创建批次目录（参考CNInfo方案）
+        # 创建批次目录
         now = datetime.now()
         date_dir = now.strftime('%Y/%m/%d')
         batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
@@ -968,16 +1131,33 @@ class KingsoftIRCrawler(BaseCrawler):
                 for section in self.sections:
                     section_name = section['name']
                     section_url = section['url']
-                    section_limit = section['limit']
 
                     self.logger.info("")
                     self.logger.info('='*60)
                     self.logger.info(f"[{section_name}] 开始采集")
                     self.logger.info('='*60)
 
-                    section_items = self._fetch_section(page, section_name, section_url, section_limit)
+                    section_items = self._fetch_section(page, section_name, section_url)
 
-                    for idx, news in enumerate(section_items, 1):
+                    # 时间过滤：只保留在时间窗口内的条目
+                    filtered_items = []
+                    skipped_count = 0
+                    empty_date_count = 0
+                    for item in section_items:
+                        time_str = item.get('time', '')
+                        if not time_str:
+                            empty_date_count += 1
+                            filtered_items.append(item)  # 无日期的条目保留，后续处理
+                            continue
+                        if not self._is_in_time_window(time_str):
+                            skipped_count += 1
+                            continue
+                        filtered_items.append(item)
+
+                    self.logger.info(f"[{section_name}] 采集 {len(section_items)} 条，"
+                                    f"过滤后保留 {len(filtered_items)} 条（超期跳过 {skipped_count} 条，无日期 {empty_date_count} 条）")
+
+                    for idx, news in enumerate(filtered_items, 1):
                         title = news.get('title', '')
                         url = news.get('url', '')
 
@@ -992,7 +1172,7 @@ class KingsoftIRCrawler(BaseCrawler):
                             continue
                         seen_urls.add(dedup_key)
 
-                        self.logger.info(f"\n[{idx}/{len(section_items)}] 处理: {title[:50]}...")
+                        self.logger.info(f"\n[{idx}/{len(filtered_items)}] 处理: {title[:50]}...")
 
                         # 根据类型采用不同的内容获取策略
                         content, old_summary, date_from_detail = "", "", ""
@@ -1121,19 +1301,29 @@ class KingsoftIRCrawler(BaseCrawler):
 
 def main():
     """测试运行"""
-    crawler = KingsoftIRCrawler()
+    import os
+
+    # 支持环境变量配置时间窗口（默认48小时）
+    hours_window = int(os.getenv('KINGSOFT_IR_HOURS_WINDOW', '48'))
+
+    crawler = KingsoftIRCrawler(hours_window=hours_window)
     items = crawler.run()
 
     print(f"\n{'='*60}")
     print(f"金山软件IR官网采集结果: {len(items)} 条")
+    print(f"时间窗口: 过去{hours_window}小时")
+    print(f"截止时间: {crawler.cutoff_time.strftime('%Y-%m-%d %H:%M')}")
+    if hours_window == 48:
+        print("提示: 如需扩大时间窗口，设置环境变量 KINGSOFT_IR_HOURS_WINDOW=72")
     print('='*60)
 
-    for i, item in enumerate(items[:10], 1):
-        print(f"\n{i}. [{item.category}] {item.title}")
+    for i, item in enumerate(items, 1):
+        print(f"\n{'─'*60}")
+        print(f"{i}. [{item.category}] {item.title}")
         print(f"   日期: {item.date}")
         print(f"   链接: {item.url}")
         if item.summary:
-            summary_display = item.summary[:150] + '...' if len(item.summary) > 150 else item.summary
+            summary_display = item.summary[:200] + '...' if len(item.summary) > 200 else item.summary
             print(f"   摘要: {summary_display}")
 
 if __name__ == "__main__":
