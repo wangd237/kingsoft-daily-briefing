@@ -3,7 +3,6 @@
 虎嗅采集器
 使用 Playwright 模拟浏览器获取搜索结果
 支持多关键词搜索、详情页正文抓取、AI 摘要
-参考第一财经采集器模式
 """
 import sys
 import io
@@ -205,8 +204,7 @@ class HuxiuCrawler(BaseCrawler):
         page.wait_for_timeout(random.randint(min_ms, max_ms))
 
     def _open_search_box(self, page) -> bool:
-        """如果搜索框未直接显示，尝试点击搜索图标展开。"""
-        self.logger.info("  搜索框未直接显示，尝试点击搜索图标...")
+        """点击搜索图标展开搜索框"""
         selectors = [
             'i.icon-search',
             '.header-search',
@@ -292,7 +290,7 @@ class HuxiuCrawler(BaseCrawler):
                 self.logger.warning(f"  未找到标题匹配的结果项: {title[:50]}")
                 return ""
 
-            self.logger.info(f"  点击第 {target_idx} 条结果")
+            self.logger.info(f"  点击第 {target_idx + 1} 条结果")
 
             # 点击标题元素，监听新标签页
             title_locator = items[target_idx].locator("h5.result-article__title")
@@ -337,7 +335,7 @@ class HuxiuCrawler(BaseCrawler):
                 self.logger.error(f"[{keyword}] 无法展开搜索框")
                 return results
 
-            self.logger.info(f"[{keyword}] 等待搜索输入框")
+            self.logger.debug(f"[{keyword}] 等待搜索输入框")
             try:
                 page.wait_for_selector('input[placeholder="搜索文章"]', timeout=10000)
             except Exception:
@@ -585,7 +583,7 @@ class HuxiuCrawler(BaseCrawler):
 def main():
     """测试运行"""
     # 支持环境变量配置时间窗口（默认24小时）
-    hours_window = int(os.getenv('HUXIU_HOURS_WINDOW', '1560'))
+    hours_window = int(os.getenv('HUXIU_HOURS_WINDOW', '1000'))
 
     crawler = HuxiuCrawler(hours_window=hours_window)
     items = crawler.run()
