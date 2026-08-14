@@ -214,15 +214,6 @@ class EastMoneyCrawler(BaseCrawler):
             page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(2000)
 
-            # 截图调试 - 保存到日志目录
-            try:
-                import os
-                os.makedirs("output/logs", exist_ok=True)
-                page.screenshot(path=f"output/logs/eastmoney_{route_type}_{keyword}.png")
-                self.logger.info(f"[{route['name']}] 已保存截图: output/logs/eastmoney_{route_type}_{keyword}.png")
-            except Exception as e:
-                self.logger.debug(f"截图失败: {e}")
-
             # 等待结果加载 - 使用更通用的选择器
             try:
                 page.wait_for_selector('.news-list, .result-list, [class*="list"]', timeout=10000)
