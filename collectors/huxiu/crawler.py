@@ -273,7 +273,7 @@ class HuxiuCrawler(BaseCrawler):
         try:
             # 通过标题找到结果项的索引
             items = page.locator(".search-result .pointer").all()
-            self.logger.info(f"  当前结果页共 {len(items)} 条结果")
+            self.logger.debug(f"  当前结果页共 {len(items)} 条结果")
 
             target_idx = -1
             for idx, item in enumerate(items):
@@ -290,7 +290,7 @@ class HuxiuCrawler(BaseCrawler):
                 self.logger.warning(f"  未找到标题匹配的结果项: {title[:50]}")
                 return ""
 
-            self.logger.info(f"  点击第 {target_idx + 1} 条结果")
+            self.logger.debug(f"  点击第 {target_idx + 1} 条结果")
 
             # 点击标题元素，监听新标签页
             title_locator = items[target_idx].locator("h5.result-article__title")
@@ -363,6 +363,7 @@ class HuxiuCrawler(BaseCrawler):
             # 截图调试
             try:
                 page.screenshot(path=f"output/logs/huxiu_{keyword}_search.png")
+                self.logger.debug(f"[{keyword}] 已保存搜索结果截图")
             except Exception:
                 pass
 
