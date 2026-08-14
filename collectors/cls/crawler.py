@@ -167,6 +167,22 @@ class CLSCrawler(BaseCrawler):
         title_lower = title.lower()
         return any(kw.lower() in title_lower for kw in self.keywords)
 
+    def _extract_title(self, content: str) -> str:
+        """
+        从内容中提取标题
+        优先匹配【】内的内容，如果没有则截取前60字符
+        """
+        if not content:
+            return ""
+
+        # 优先匹配【】内的内容作为标题
+        match = re.search(r'【([^】]+)】', content)
+        if match:
+            return match.group(1).strip()
+
+        # 未匹配到，使用截取法
+        return content[:60] + "..." if len(content) > 60 else content
+
     def _search_keyword(self, page, keyword: str) -> List[Dict]:
         """搜索单个关键词"""
         results = []
@@ -237,7 +253,8 @@ class CLSCrawler(BaseCrawler):
                     if not content:
                         continue
 
-                    title = content[:60] + "..." if len(content) > 60 else content
+                    # 使用改进的标题提取方法
+                    title = self._extract_title(content)
                     url = item.get('url', '')
                     if url and not url.startswith('http'):
                         url = f"{self.base_url}{url}"
@@ -467,7 +484,7 @@ def main():
     import os
 
     # 支持环境变量配置时间窗口（默认24小时）
-    hours_window = int(os.getenv('CLS_HOURS_WINDOW', '1600'))
+    hours_window = int(os.getenv('CLS_HOURS_WINDOW', '500'))
 
     crawler = CLSCrawler(hours_window=hours_window)
     items = crawler.run()
