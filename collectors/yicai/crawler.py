@@ -31,16 +31,16 @@ class YicaiCrawler(BaseCrawler):
     source_code = "yicai"
     credibility_base = "【媒体报道】"
 
-    def __init__(self, enable_summary: bool = None, hours_window: int = 24):
+    def __init__(self, enable_summary: bool = None, hours_window: int = None):
         # 从配置读取参数
         config = COLLECTORS.get('yicai', {})
         self.keywords = config.get('keywords', ['金山办公'])
         self.max_items_per_keyword = 50  # 提高上限，过滤后保留足够数据
 
         # 时间窗口（默认24小时）
-        self.hours_window = hours_window
-        self.cutoff_time = datetime.now() - timedelta(hours=hours_window)
-        self.logger_info = f"时间窗口: 过去{hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
+        self.hours_window = hours_window or config.get('hours_window', 24)
+        self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
+        self.logger_info = f"时间窗口: 过去{self.hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
 
         # 从配置读取 enable_summary
         if enable_summary is None:
@@ -374,7 +374,7 @@ def main():
     import os
 
     # 支持环境变量配置时间窗口（默认24小时）
-    hours_window = int(os.getenv('YICAI_HOURS_WINDOW', '2400'))  # 默认24小时，便于测试
+    hours_window = int(os.getenv('YICAI_HOURS_WINDOW', '24'))
 
     crawler = YicaiCrawler(hours_window=hours_window)
     items = crawler.run()
