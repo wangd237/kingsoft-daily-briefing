@@ -34,24 +34,26 @@ COLLECTORS = {
         'stock_code': '688111',
         'org_id': '9900035303',
         'credibility': '【官方公告】',
-        'enable_summary': True,  # 启用 AI 摘要
+        'enable_summary': True,  
         'hours_window': 24,  # 时间窗口：24小时
     },
     'hkex': {
-        'enabled': False,  # 待实现
+        'enabled': True,
         'name': '港交所披露易',
+        'credibility': '【官方公告】',
+        'enable_summary': True,
+        'hours_window': 24,
         'stocks': [
             {'code': '03888', 'name': '金山软件'},
             {'code': '03896', 'name': '金山云'},
         ],
-        'credibility': '【官方公告】',
-        'enable_summary': False,
     },
     'kingsoft_ir': {
         'enabled': True,
         'name': '金山软件IR官网',
         'credibility': '【官方公告】',
-        'enable_summary': True,  # 启用 AI 摘要
+        'enable_summary': True,
+        'hours_window': 24,  # IR官网公告需要更长时间窗口
     },
     'kingsoft_office_ir': {
         'enabled': True,
@@ -130,6 +132,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,
     },
     'cls': {
         'enabled': True,
@@ -137,6 +140,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,
     },
     'huxiu': {
         'enabled': True,
@@ -144,6 +148,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,
     },
     'eastmoney': {
         'enabled': True,
@@ -151,6 +156,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,
     },
     'xueqiu': {
         'enabled': True,
@@ -158,6 +164,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,
     },
     'wind': {
         'enabled': False,  # Wind需要授权，默认禁用
@@ -173,12 +180,14 @@ COLLECTORS = {
         'keywords': ['金山', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,
     },
     'gamelook': {
         'enabled': True,
         'name': 'GameLook',
         'keywords': ['金山', '西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
         'credibility': '【媒体报道】',
+        'hours_window': 24,
         'enable_summary': True,
     },
     'gamersky': {
@@ -187,6 +196,7 @@ COLLECTORS = {
         'keywords': ['西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,
     },
     'ali213': {
         'enabled': True,
@@ -194,6 +204,7 @@ COLLECTORS = {
         'keywords': ['西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
+        'hours_window': 24,
     },
 }
 
