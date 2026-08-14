@@ -199,9 +199,9 @@ class BaseCrawler(ABC):
             self.logger.error(f"采集失败: {e}", exc_info=True)
             raise
 
-    def generate_summary(self, title: str, content: str, max_length: int = 150) -> Tuple[Optional[str], Optional[datetime]]:
+    def generate_summary(self, title: str, content: str, max_length: int = 150) -> Tuple[str, datetime]:
         """
-        生成 AI 摘要
+        生成摘要，始终返回有效文本（AI生成或fallback截取）
 
         Args:
             title: 标题
@@ -209,18 +209,35 @@ class BaseCrawler(ABC):
             max_length: 摘要最大字数
 
         Returns:
-            (摘要文本, 生成时间)，失败返回 (None, None)
+            (摘要文本, 生成时间)
+            摘要文本永远不会为None，失败时使用fallback策略
         """
-        if not self.summarizer or not self.summarizer.is_available():
-            return None, None
+        # 1. 尝试AI摘要
+        if self.summarizer and self.summarizer.is_available() and len(content) >= 50:
+            try:
+                result = self.summarizer.summarize(title, content, max_length)
+                if result:
+                    summary, gen_time = result
+                    return summary, gen_time  # AI成功，静默返回
+            except Exception as e:
+                self.logger.warning(f"AI摘要失败，使用fallback: {e}")
 
-        if not content or len(content.strip()) < 50:
-            return None, None
+        # 2. Fallback策略（AI失败或不可用时，记录日志）
+        if not content or len(content.strip()) == 0:
+            # 无内容，使用标题
+            self.logger.info(f"内容为空，使用标题作为摘要: {title[:30]}...")
+            return title[:max_length], datetime.now()
 
-        result = self.summarizer.summarize(title, content, max_length=max_length)
-        if result:
-            return result
-        return None, None
+        elif len(content) <= max_length:
+            # 内容短，直接用全文
+            self.logger.info(f"内容较短({len(content)}字)，直接使用全文作为摘要: {title[:30]}...")
+            return content, datetime.now()
+
+        else:
+            # 内容长，截取前max_length字
+            truncated = content[:max_length] + "..."
+            self.logger.info(f"使用截取摘要({max_length}字): {title[:30]}...")
+            return truncated, datetime.now()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """上下文管理器退出时自动保存"""
