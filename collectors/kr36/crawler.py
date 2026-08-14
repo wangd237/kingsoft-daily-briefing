@@ -10,7 +10,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta  # 新增 timedelta
 from pathlib import Path
 from urllib.parse import quote
 import time
@@ -25,17 +25,31 @@ from config.settings import CATEGORIES, COLLECTORS
 
 
 class Kr36Crawler(BaseCrawler):
-    """36氪采集器"""
+    """36氪采集器
+    支持多关键词搜索、时间窗口过滤（默认24小时）、详情页正文抓取、AI 摘要
+    """
 
     source_name = "36氪"
     source_code = "kr36"
     credibility_base = "【媒体报道】"
 
-    def __init__(self, enable_summary: bool = None):
+    def __init__(self, enable_summary: bool = None, hours_window: int = None):
+        """
+        初始化
+
+        Args:
+            enable_summary: 是否启用 AI 摘要
+            hours_window: 时间窗口（小时），默认24小时
+        """
         # 从配置读取参数
         config = COLLECTORS.get('kr36', {})
         self.keywords = config.get('keywords', ['金山办公'])
         self.max_items_per_keyword = 5  # 每个关键词最多采集条数
+
+        # 时间窗口（默认24小时）
+        self.hours_window = hours_window or config.get('hours_window', 24)
+        self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
+        self.logger_info = f"时间窗口: 过去{self.hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
 
         # 从配置读取 enable_summary
         if enable_summary is None:
@@ -59,33 +73,43 @@ class Kr36Crawler(BaseCrawler):
             return max(scores, key=scores.get)
         return "产品动态"
 
-    def _parse_time(self, time_str: str) -> str:
-        """解析时间字符串"""
+    def _parse_kr36_time(self, time_str: str) -> datetime:
+        """
+        解析36氪的时间字符串为 datetime
+        支持格式: 时间戳(毫秒), ISO格式, YYYY-MM-DD
+        解析失败返回当前时间（保留数据）
+        """
         if not time_str:
-            return datetime.now().strftime('%Y-%m-%d')
+            self.logger.warning(f"⚠️ 时间解析失败(空值)，已回退到今日时间")
+            return datetime.now()
 
         # 时间戳（毫秒）
         if isinstance(time_str, (int, float)) or (isinstance(time_str, str) and time_str.isdigit()):
             try:
                 timestamp = int(time_str) / 1000  # 毫秒转秒
-                dt = datetime.fromtimestamp(timestamp)
-                return dt.strftime('%Y-%m-%d')
+                return datetime.fromtimestamp(timestamp)
             except:
                 pass
 
         # ISO格式
         try:
-            dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
-            return dt.strftime('%Y-%m-%d')
+            return datetime.fromisoformat(time_str.replace('Z', '+00:00'))
         except:
             pass
 
         # 尝试正则匹配日期
         match = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', str(time_str))
         if match:
-            return f"{match.group(1)}-{match.group(2).zfill(2)}-{match.group(3).zfill(2)}"
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return datetime(year, month, day)
 
-        return datetime.now().strftime('%Y-%m-%d')
+        self.logger.warning(f"⚠️ 时间解析失败('{time_str}')，已回退到今日时间")
+        return datetime.now()
+
+    def _parse_time(self, time_str: str) -> str:
+        """解析时间字符串，返回 YYYY-MM-DD 格式（兼容旧方法）"""
+        dt = self._parse_kr36_time(time_str)
+        return dt.strftime('%Y-%m-%d')
 
     def _extract_search_results(self, page, keyword: str) -> list[dict]:
         """从搜索页面提取结果"""
@@ -205,30 +229,28 @@ class Kr36Crawler(BaseCrawler):
         except Exception as e:
             self.logger.error(f"[{keyword}] 提取搜索结果失败: {e}")
 
-        # 获取当前日期
-        today = datetime.now().strftime('%Y-%m-%d')
-
-        # 过滤：只保留标题中包含搜索关键词且日期为当天的结果
+        # 过滤：关键词匹配 + 时间窗口
         filtered_results = []
         keyword_lower = keyword.lower()
+
         for item in results:
             title = item.get('title', '')
             time_str = item.get('time', '')
 
             # 检查关键词匹配
             if keyword_lower not in title.lower():
-                self.logger.debug(f"[{keyword}] 过滤掉不相关结果: {title[:50]}...")
+                self.logger.debug(f"[{keyword}] 关键词过滤: {title[:50]}...")
                 continue
 
-            # 检查日期是否为当天
-            item_date = self._parse_time(time_str)
-            if item_date != today:
-                self.logger.debug(f"[{keyword}] 过滤掉非当天结果: {title[:50]}... (日期: {item_date})")
+            # 检查时间窗口
+            item_datetime = self._parse_kr36_time(time_str)
+            if item_datetime < self.cutoff_time:
+                self.logger.debug(f"[{keyword}] 时间过滤: {title[:50]}... (时间: {item_datetime.strftime('%Y-%m-%d')})")
                 continue
 
             filtered_results.append(item)
 
-        self.logger.info(f"[{keyword}] 过滤后: {len(filtered_results)}/{len(results)} 条 (当天日期: {today})")
+        self.logger.info(f"[{keyword}] 过滤后: {len(filtered_results)}/{len(results)} 条 (时间窗口: {self.hours_window}小时)")
         return filtered_results
 
     def _fetch_content_with_playwright(self, page, url: str) -> str:
@@ -315,6 +337,7 @@ class Kr36Crawler(BaseCrawler):
         all_items = []
 
         self.logger.info(f"开始采集36氪 - 关键词: {self.keywords}")
+        self.logger.info(self.logger_info)
 
         # 创建批次目录
         now = datetime.now()
@@ -398,11 +421,17 @@ class Kr36Crawler(BaseCrawler):
 
 def main():
     """测试运行"""
-    crawler = Kr36Crawler()
+    import os
+
+    hours_window = int(os.getenv('KR36_HOURS_WINDOW', '24'))
+
+    crawler = Kr36Crawler(hours_window=hours_window)
     items = crawler.run()
 
     print(f"\n{'='*70}")
     print(f"36氪采集结果: {len(items)} 条")
+    print(f"时间窗口: 过去{hours_window}小时")
+    print(f"截止时间: {crawler.cutoff_time.strftime('%Y-%m-%d %H:%M')}")
     print('='*70)
 
     for i, item in enumerate(items, 1):
