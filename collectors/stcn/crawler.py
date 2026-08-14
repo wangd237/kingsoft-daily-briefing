@@ -10,7 +10,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 import time
@@ -25,42 +25,41 @@ from config.settings import CATEGORIES, COLLECTORS
 
 
 class StcnCrawler(BaseCrawler):
-    """证券时报e公司采集器"""
+    """证券时报e公司采集器
+    支持多关键词搜索、时间窗口过滤（默认24小时）、详情页正文抓取、AI 摘要
+    """
 
     source_name = "证券时报e公司"
     source_code = "stcn"
     credibility_base = "【媒体报道】"
 
-    def __init__(self, enable_summary: bool = True, test_date: str | None = None, skip_date_filter: bool = False):
+    def __init__(self, enable_summary: bool = True, hours_window: int = None, skip_date_filter: bool = False):
+        """
+        初始化
+
+        Args:
+            enable_summary: 是否启用 AI 摘要
+            hours_window: 时间窗口（小时），默认24小时
+            skip_date_filter: 是否跳过日期过滤（兼容旧参数）
+        """
         # 从配置读取参数
         config = COLLECTORS.get('stcn', {})
         self.keywords = config.get('keywords', ['金山办公'])
         self.max_items_per_keyword = 5  # 每个关键词最多采集条数
 
-        # 从配置读取 enable_summary（如果配置为 false 则覆盖传入值）
+        # 从配置读取 enable_summary
         config_enable_summary = config.get('enable_summary', True)
         final_enable_summary = enable_summary and config_enable_summary
 
-        # 日期过滤开关
-        self.skip_date_filter = skip_date_filter
-
-        # 日期过滤（支持测试日期）
-        import os
-        env_date = os.getenv('STCN_TEST_DATE')
-        target_date = test_date or env_date
-
-        if self.skip_date_filter:
-            self.today = target_date or datetime.now().strftime('%Y-%m-%d')
-            self.today_slash = self.today.replace('-', '/')
-            self.logger_info = f"⚠️ 日期过滤已禁用 - 参考日期: {self.today}"
-        elif target_date:
-            self.today = target_date
-            self.today_slash = target_date.replace('-', '/')
-            self.logger_info = f"测试模式 - 目标日期: {self.today}"
+        # 时间窗口（默认24小时）
+        if skip_date_filter:
+            self.hours_window = None
+            self.cutoff_time = None
+            self.logger_info = "⚠️ 时间过滤已禁用"
         else:
-            self.today = datetime.now().strftime('%Y-%m-%d')
-            self.today_slash = datetime.now().strftime('%Y/%m/%d')
-            self.logger_info = f"正常模式 - 当天日期: {self.today}"
+            self.hours_window = hours_window or config.get('hours_window', 24)
+            self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
+            self.logger_info = f"时间窗口: 过去{self.hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
 
         super().__init__(enable_summary=final_enable_summary)
 
@@ -80,21 +79,19 @@ class StcnCrawler(BaseCrawler):
             return max(scores, key=scores.get)
         return "资本动态"
 
-    def _is_today(self, time_str: str) -> bool:
-        """判断时间是否为当天"""
-        if self.skip_date_filter:
-            return True
-
+    def _parse_stcn_time(self, time_str: str) -> datetime:
+        """
+        解析证券时报的时间字符串为 datetime
+        支持格式: YYYY-MM-DD HH:MM:SS, YYYY-MM-DD, YYYY/MM/DD, MM-DD HH:MM 等
+        解析失败返回当前时间（保留数据）
+        """
         if not time_str:
-            return False
+            self.logger.warning(f"⚠️ 时间解析失败(空值)，已回退到今日时间")
+            return datetime.now()
 
         time_str = time_str.strip()
 
-        # 直接匹配当天日期格式
-        if self.today in time_str or self.today_slash in time_str:
-            return True
-
-        # 尝试解析时间字符串
+        # 各种格式尝试
         formats = [
             '%Y-%m-%d %H:%M:%S',
             '%Y-%m-%d %H:%M',
@@ -103,28 +100,50 @@ class StcnCrawler(BaseCrawler):
             '%Y/%m/%d %H:%M',
             '%Y/%m/%d',
             '%m-%d %H:%M',
-            '%H:%M',
         ]
 
         for fmt in formats:
             try:
                 parsed = datetime.strptime(time_str, fmt)
-                if fmt == '%H:%M':
-                    return True
                 if fmt == '%m-%d %H:%M':
-                    # 假设是今年
+                    # 补充年份
                     parsed = parsed.replace(year=datetime.now().year)
-                    return parsed.strftime('%Y-%m-%d') == self.today
-                return parsed.strftime('%Y-%m-%d') == self.today
+                return parsed
             except ValueError:
                 continue
 
-        return True
+        # HH:MM 格式（假设今天）
+        try:
+            parsed = datetime.strptime(time_str, '%H:%M')
+            now = datetime.now()
+            return now.replace(hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+        except ValueError:
+            pass
+
+        # 解析失败，返回当前时间
+        self.logger.warning(f"⚠️ 时间解析失败('{time_str}')，已回退到今日时间")
+        return datetime.now()
+
+    def _is_in_time_window(self, time_str: str) -> bool:
+        """判断时间是否在时间窗口内"""
+        if self.cutoff_time is None:
+            return True
+
+        parsed_time = self._parse_stcn_time(time_str)
+        return parsed_time >= self.cutoff_time
+
+    def _is_today(self, time_str: str) -> bool:
+        """判断时间是否为当天（兼容旧方法）"""
+        if self.cutoff_time is None:
+            return True
+
+        parsed_time = self._parse_stcn_time(time_str)
+        return parsed_time.strftime('%Y-%m-%d') == datetime.now().strftime('%Y-%m-%d')
 
     def _parse_time(self, time_str: str) -> str:
         """解析时间字符串，返回 YYYY-MM-DD 格式"""
         if not time_str or time_str.strip() == '':
-            return self.today
+            return datetime.now().strftime('%Y-%m-%d')
 
         time_str = time_str.strip()
 
@@ -286,14 +305,14 @@ class StcnCrawler(BaseCrawler):
                 self.logger.debug(f"[{keyword}] 过滤掉不相关结果: {title[:50]}...")
                 continue
 
-            # 检查日期是否为当天（如果 skip_date_filter=True 则跳过此检查）
-            if not self.skip_date_filter and not self._is_today(time_str):
-                self.logger.debug(f"[{keyword}] 过滤掉非当天结果: {title[:50]}... (日期: {time_str})")
+            # 检查时间窗口
+            if self.cutoff_time and not self._is_in_time_window(time_str):
+                self.logger.debug(f"[{keyword}] 时间过滤: {title[:50]}... (日期: {time_str})")
                 continue
 
             filtered_results.append(item)
 
-        filter_mode = "日期过滤已禁用" if self.skip_date_filter else f"当天: {self.today}"
+        filter_mode = "时间过滤已禁用" if self.cutoff_time is None else f"时间窗口: {self.hours_window}小时"
         self.logger.info(f"[{keyword}] 过滤后: {len(filtered_results)}/{len(results)} 条 ({filter_mode})")
         return filtered_results
 
@@ -477,13 +496,12 @@ def main():
     import os
 
     enable_summary = os.getenv('STCN_ENABLE_SUMMARY', 'true').lower() == 'true'
-    test_date = os.getenv('STCN_TEST_DATE')
+    hours_window = int(os.getenv('STCN_HOURS_WINDOW', '24'))
     skip_date_filter = os.getenv('STCN_SKIP_DATE_FILTER', 'false').lower() == 'true'
-
 
     crawler = StcnCrawler(
         enable_summary=enable_summary,
-        test_date=test_date,
+        hours_window=hours_window if not skip_date_filter else None,
         skip_date_filter=skip_date_filter
     )
     items = crawler.run()
@@ -491,11 +509,10 @@ def main():
     print(f"\n{'='*70}")
     print(f"证券时报e公司采集结果: {len(items)} 条")
     if skip_date_filter:
-        print("⚠️  日期过滤已禁用 - 采集所有日期")
+        print("⚠️  时间过滤已禁用 - 采集所有日期")
     else:
-        print(f"过滤日期: {crawler.today}")
-    if test_date:
-        print(f"📅 测试日期: {test_date}")
+        print(f"时间窗口: 过去{hours_window}小时")
+        print(f"截止时间: {crawler.cutoff_time.strftime('%Y-%m-%d %H:%M')}")
     print('='*70)
 
     for i, item in enumerate(items, 1):
