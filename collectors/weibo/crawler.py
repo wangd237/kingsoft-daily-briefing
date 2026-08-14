@@ -95,23 +95,25 @@ class WeiboCrawler(BaseCrawler):
             return max(scores, key=scores.get)
         return "产品动态"
 
-    def _parse_weibo_time(self, timestamp: int) -> datetime:
+    def _parse_weibo_time(self, timestamp) -> datetime:
         """
-        解析微博时间戳为 datetime
-        微博时间戳是秒级
-
-        Args:
-            timestamp: 微博 created_at 字段（秒级时间戳）
-
-        Returns:
-            datetime 对象
+        解析微博时间，返回 offset-naive datetime（无时区）
+        便于与 cutoff_time 比较
         """
         if not timestamp:
             self.logger.warning(f"⚠️ 时间解析失败(空值)，已回退到今日时间")
             return datetime.now()
 
+        # 如果已经是 datetime 对象
+        if isinstance(timestamp, datetime):
+            # 如果是 offset-aware，转换为 offset-naive
+            if timestamp.tzinfo is not None:
+                return timestamp.replace(tzinfo=None)
+            return timestamp
+
+        # 如果是时间戳（整数/浮点数）
         try:
-            return datetime.fromtimestamp(timestamp)
+            return datetime.fromtimestamp(int(timestamp))
         except (ValueError, TypeError, OSError) as e:
             self.logger.warning(f"⚠️ 时间解析失败('{timestamp}'): {e}，已回退到今日时间")
             return datetime.now()
@@ -257,10 +259,20 @@ class WeiboCrawler(BaseCrawler):
                 # 发布时间
                 post_time = self._parse_weibo_time(post['created_at'])
 
-                # 可信度标签
-                credibility = f"{self.credibility_base}｜{post['account_name']}"
-                if post['account_type'] == '个人':
-                    credibility = f"【行业人士】｜{post['account_name']}"
+                # 将 created_at 转换为字符串（如果是 datetime 对象）
+                created_at_raw = post['created_at']
+                if isinstance(created_at_raw, datetime):
+                    created_at_str = created_at_raw.isoformat()
+                else:
+                    created_at_str = str(created_at_raw) if created_at_raw else None
+
+                # 构建 raw_data（简化，不包含互动数据）
+                raw_data = {
+                    'account_name': post['account_name'],
+                    'account_type': post['account_type'],
+                    'post_id': post['id'],
+                    'created_at': created_at_str,
+                }
 
                 item = NewsItem(
                     title=title,
@@ -268,22 +280,11 @@ class WeiboCrawler(BaseCrawler):
                     url=url,
                     source=self.source_name,
                     source_code=self.source_code,
-                    credibility_tag=credibility,
+                    credibility_tag='【官方资讯】',  # 统一使用官方资讯标签
                     category=self._auto_classify(post['text']),
                     summary=summary,
                     content=post['text'],
-                    raw_data={
-                        'account_name': post['account_name'],
-                        'account_type': post['account_type'],
-                        'post_id': post['id'],
-                        'created_at': post['created_at'],
-                        'likes': post['attitudes_count'],
-                        'comments': post['comments_count'],
-                        'reposts': post['reposts_count'],
-                        'pic_urls': post['pic_urls'],
-                        'video_url': post['video_url'],
-                        'is_top': post['is_top'],
-                    },
+                    raw_data=raw_data,
                 )
 
                 # AI 摘要
@@ -305,7 +306,7 @@ def main():
     """测试运行"""
     import os
 
-    hours_window = int(os.getenv('WEIBO_HOURS_WINDOW', '24'))
+    hours_window = int(os.getenv('WEIBO_HOURS_WINDOW', '72'))
 
     crawler = WeiboCrawler(hours_window=hours_window)
     items = crawler.run()
@@ -323,11 +324,8 @@ def main():
         print(f"   日期: {item.date}")
         print(f"   链接: {item.url}")
 
-        if item.raw_data:
-            print(f"   点赞: {item.raw_data.get('likes', 0)} 评论: {item.raw_data.get('comments', 0)} 转发: {item.raw_data.get('reposts', 0)}")
-
         if item.summary:
-            print(f"   AI摘要: {item.summary[:200]}...")
+            print(f"   摘要: {item.summary[:200]}...")
 
 
 if __name__ == "__main__":
