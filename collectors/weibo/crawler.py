@@ -74,6 +74,7 @@ class WeiboCrawler(BaseCrawler):
             enable_summary = config.get('enable_summary', True)
 
         super().__init__(enable_summary=enable_summary)
+        self.enable_summary = enable_summary  # 保存实例属性供后续使用
 
         # 初始化 crawl4weibo 客户端
         self.logger.info("初始化微博客户端...")
@@ -144,6 +145,79 @@ class WeiboCrawler(BaseCrawler):
 
         return '\n'.join(text_parts)
 
+    def _build_full_context(self, post, result: dict) -> tuple[str, dict]:
+        """
+        构建包含转发上下文的完整文本
+
+        Args:
+            post: crawl4weibo 返回的 Post 对象
+            result: 已构建的基础结果字典
+
+        Returns:
+            (完整上下文文本, 转发信息字典)
+        """
+        retweet_info = {
+            'is_retweet': False,
+            'retweeted_from': None,
+            'retweeted_text': None,
+        }
+
+        # 检查是否有转发内容
+        retweet = None
+        if hasattr(post, 'retweeted_status') and post.retweeted_status:
+            retweet = post.retweeted_status
+
+        if not retweet:
+            # 非转发微博，直接返回原文
+            return result['text'], retweet_info
+
+        # 是转发微博，构建完整上下文
+        retweet_info['is_retweet'] = True
+
+        # 获取原微博作者
+        original_author = "未知用户"
+        if hasattr(retweet, 'user') and retweet.user:
+            if hasattr(retweet.user, 'screen_name'):
+                original_author = retweet.user.screen_name
+            elif hasattr(retweet.user, 'id'):
+                original_author = f"用户{retweet.user.id}"
+
+        retweet_info['retweeted_from'] = original_author
+
+        # 获取原微博内容
+        original_text = ""
+        if hasattr(retweet, 'text') and retweet.text:
+            original_text = retweet.text
+            retweet_info['retweeted_text'] = original_text
+
+        # 构建完整上下文
+        full_context_parts = [
+            f"【评论】{result['text']}",
+            "",
+            "────────────────────────────",
+            f"【引用 @{original_author}】",
+        ]
+
+        if original_text:
+            full_context_parts.append(original_text)
+
+            # 如果原微博有长文本
+            if hasattr(retweet, 'long_text') and retweet.long_text:
+                full_context_parts.append(f"\n[长文本] {retweet.long_text}")
+
+        # 获取原微博发布时间
+        if hasattr(retweet, 'created_at') and retweet.created_at:
+            original_time = retweet.created_at
+            if isinstance(original_time, datetime):
+                original_time_str = original_time.strftime('%Y-%m-%d %H:%M')
+            else:
+                original_time_str = str(original_time)
+            full_context_parts.append(f"\n（原微博发布时间: {original_time_str}）")
+
+        full_context = '\n'.join(full_context_parts)
+
+        return full_context, retweet_info
+
     def _fetch_account_posts(self, account: dict) -> list[dict]:
         """
         采集单个账号的微博
@@ -163,7 +237,8 @@ class WeiboCrawler(BaseCrawler):
         try:
             # 获取用户信息
             user = self.client.get_user_by_uid(uid)
-            self.logger.info(f"[{name}] 用户验证成功: {user.screen_name}, 粉丝: {user.followers_count}")
+            self.logger.info(f"[{name}] 用户验证成功: {user.screen_name}")
+            #self.logger.info(f"[{name}] 用户验证成功: {user.screen_name}, 粉丝: {user.followers_count}")
 
             # 分页获取微博
             for page in range(1, self.max_pages_per_account + 1):
@@ -190,7 +265,7 @@ class WeiboCrawler(BaseCrawler):
                         time_filtered += 1
                         continue
 
-                    # 构建结果
+                    # 构建基础结果
                     result = {
                         'id': post.id,
                         'bid': post.bid,
@@ -207,6 +282,12 @@ class WeiboCrawler(BaseCrawler):
                         'source': post.source if hasattr(post, 'source') else '',
                         'is_top': post.is_top if hasattr(post, 'is_top') else False,
                     }
+
+                    # 构建完整上下文（包含转发内容）
+                    full_context, retweet_info = self._build_full_context(post, result)
+                    result['full_context'] = full_context
+                    result['retweet_info'] = retweet_info
+
                     results.append(result)
 
                 # 如果大量数据超时，停止翻页
@@ -243,18 +324,20 @@ class WeiboCrawler(BaseCrawler):
             posts = self._fetch_account_posts(account)
 
             for post in posts:
-                # 构建标题
-                title = post['text'].replace('\n', ' ')[:50]
-                if len(post['text']) > 50:
-                    title += "..."
+                # 获取完整上下文（包含转发内容）
+                full_context = post.get('full_context', post['text'])
+                retweet_info = post.get('retweet_info', {})
+
+                # 构建标题（使用原文本，保持简洁）
+                title_text = post['text'].replace('\n', ' ')[:50]
+                title = title_text + "..." if len(post['text']) > 50 else title_text
 
                 # 构建URL
                 url = f"https://weibo.com/{post['uid']}/{post['bid']}"
 
-                # 构建摘要
-                summary = post['text'][:200]
-                if len(post['text']) > 200:
-                    summary += "..."
+                # 构建摘要（使用原文本）
+                summary_text = post['text'][:200]
+                summary = summary_text + "..." if len(post['text']) > 200 else summary_text
 
                 # 发布时间
                 post_time = self._parse_weibo_time(post['created_at'])
@@ -266,13 +349,19 @@ class WeiboCrawler(BaseCrawler):
                 else:
                     created_at_str = str(created_at_raw) if created_at_raw else None
 
-                # 构建 raw_data（简化，不包含互动数据）
+                # 构建 raw_data（包含转发信息）
                 raw_data = {
                     'account_name': post['account_name'],
                     'account_type': post['account_type'],
                     'post_id': post['id'],
                     'created_at': created_at_str,
+                    'is_retweet': retweet_info.get('is_retweet', False),
                 }
+
+                # 如果是转发，添加原微博信息
+                if retweet_info.get('is_retweet'):
+                    raw_data['retweeted_from'] = retweet_info.get('retweeted_from')
+                    raw_data['retweeted_text_preview'] = retweet_info.get('retweeted_text', '')[:100] + '...' if retweet_info.get('retweeted_text') else None
 
                 item = NewsItem(
                     title=title,
@@ -283,13 +372,13 @@ class WeiboCrawler(BaseCrawler):
                     credibility_tag='【官方资讯】',  # 统一使用官方资讯标签
                     category=self._auto_classify(post['text']),
                     summary=summary,
-                    content=post['text'],
+                    content=full_context,  # 保存完整上下文
                     raw_data=raw_data,
                 )
 
-                # AI 摘要
-                if self.enable_summary and len(post['text']) > 100:
-                    ai_summary, summary_time = self.generate_summary(title, post['text'])
+                # AI 摘要（使用完整上下文生成）
+                if self.enable_summary and len(full_context) > 50:
+                    ai_summary, summary_time = self.generate_summary(title, full_context)
                     if ai_summary:
                         item.summary = ai_summary
                         item.summary_generated_at = summary_time
