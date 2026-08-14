@@ -1301,7 +1301,7 @@ class KingsoftIRCrawler(BaseCrawler):
 def main():
     """测试运行"""
     # 支持环境变量配置时间窗口（默认48小时）
-    hours_window = int(os.getenv('KINGSOFT_IR_HOURS_WINDOW', '48'))
+    hours_window = int(os.getenv('KINGSOFT_IR_HOURS_WINDOW', '500'))
 
     crawler = KingsoftIRCrawler(hours_window=hours_window)
     items = crawler.run()
