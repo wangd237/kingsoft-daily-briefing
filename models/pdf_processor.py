@@ -114,13 +114,33 @@ class PDFProcessor:
             logger.info(f"下载 PDF: {pdf_url}")
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/pdf,*/*',
+                'Accept': 'application/pdf,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
             }
             if extra_headers:
                 headers.update(extra_headers)
-            response = requests.get(pdf_url, headers=headers, timeout=30)
+
+            # 针对上交所的特殊处理
+            if 'sse.com.cn' in pdf_url:
+                headers.update({
+                    'Sec-Fetch-Site': 'same-origin',
+                    'Sec-Fetch-Mode': 'no-cors',
+                })
+
+            response = requests.get(pdf_url, headers=headers, timeout=30, allow_redirects=True)
             response.raise_for_status()
+
+            # 检查内容类型
+            content_type = response.headers.get('Content-Type', '')
+            logger.debug(f"  Content-Type: {content_type}")
 
             # 保存
             with open(pdf_path, 'wb') as f:
