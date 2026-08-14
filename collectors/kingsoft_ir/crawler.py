@@ -36,7 +36,7 @@ class KingsoftIRCrawler(BaseCrawler):
         # 从配置读取参数
         config = COLLECTORS.get('kingsoft_ir', {})
 
-        # 时间窗口（默认48小时，港交所公告通常需要更长时间）
+        # 时间窗口（优先参数，其次配置，默认48小时）
         self.hours_window = hours_window or config.get('hours_window', 48)
         self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
         self.logger_info = f"时间窗口: 过去{self.hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
@@ -1300,8 +1300,8 @@ class KingsoftIRCrawler(BaseCrawler):
 
 def main():
     """测试运行"""
-    # 支持环境变量配置时间窗口（默认48小时）
-    hours_window = int(os.getenv('KINGSOFT_IR_HOURS_WINDOW', '500'))
+    # 支持环境变量配置时间窗口（默认24小时）
+    hours_window = int(os.getenv('KINGSOFT_IR_HOURS_WINDOW', '24'))
 
     crawler = KingsoftIRCrawler(hours_window=hours_window)
     items = crawler.run()
