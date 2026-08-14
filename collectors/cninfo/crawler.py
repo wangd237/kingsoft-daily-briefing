@@ -287,7 +287,7 @@ def main():
     """测试运行"""
     import os
 
-    hours_window = int(os.getenv('CNINFO_HOURS_WINDOW', '24'))
+    hours_window = int(os.getenv('CNINFO_HOURS_WINDOW', '500'))
     enable_summary = os.getenv('CNINFO_ENABLE_SUMMARY', 'true').lower() == 'true'
 
     crawler = CNInfoCrawler(hours_window=hours_window, enable_summary=enable_summary)
