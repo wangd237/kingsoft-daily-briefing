@@ -8,7 +8,7 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-from datetime import datetime
+from datetime import datetime, timedelta  # 新增 timedelta
 from typing import List, Optional, Tuple
 from pathlib import Path
 
@@ -21,24 +21,36 @@ from config.settings import COLLECTORS
 
 
 class CNInfoCrawler(BaseCrawler):
-    """巨潮资讯采集器"""
+    """巨潮资讯采集器（PDF 版本）
+    下载公告 PDF -> 解析文本 -> AI 摘要
+    支持全量采集 + 时间窗口过滤（默认24小时）
+    """
 
     source_name = "巨潮资讯网"
     source_code = "cninfo"
     credibility_base = "【官方公告】"
 
-    def __init__(self, max_items: int = 5, enable_summary: bool = None):
+    def __init__(self, max_items: int = None, enable_summary: bool = None, hours_window: int = None):
         """
         初始化
 
         Args:
-            max_items: 最多抓取几条公告（默认5条）
+            max_items: 已废弃，保留仅用于兼容，不再使用。现采用全量采集+时间过滤
             enable_summary: 是否启用 AI 摘要（默认从配置读取）
+            hours_window: 时间窗口（小时），默认24小时
         """
         config = COLLECTORS.get('cninfo', {})
         self.stock_code = config.get('stock_code', '688111')
         self.org_id = config.get('org_id', '9900035303')
-        self.max_items = max_items
+
+        # 时间窗口（默认24小时）
+        self.hours_window = hours_window or config.get('hours_window', 24)
+        self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
+        self.logger_info = f"时间窗口: 过去{self.hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
+
+        # 废弃警告
+        if max_items is not None and max_items != 5:
+            self.logger.warning(f"max_items 参数已废弃，当前使用全量采集+时间过滤，忽略 max_items={max_items}")
 
         # 从配置读取 enable_summary，未设置则默认为 True
         if enable_summary is None:
@@ -70,6 +82,46 @@ class CNInfoCrawler(BaseCrawler):
 
         return "资本动态"
 
+    def _parse_cninfo_time(self, time_str: str) -> datetime:
+        """
+        解析巨潮资讯的公告时间
+        支持格式: YYYY-MM-DD, YYYY-MM-DD HH:MM:SS, YYYY/MM/DD
+        解析失败返回当前时间（保留数据）
+        """
+        if not time_str:
+            self.logger.warning(f"⚠️ 时间解析失败(空值)，已回退到今日时间")
+            return datetime.now()
+
+        time_str = time_str.strip()
+
+        # 标准格式 YYYY-MM-DD
+        try:
+            return datetime.strptime(time_str, '%Y-%m-%d')
+        except ValueError:
+            pass
+
+        # 带时间格式 YYYY-MM-DD HH:MM:SS
+        try:
+            return datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            pass
+
+        # 带时间格式 YYYY-MM-DD HH:MM
+        try:
+            return datetime.strptime(time_str, '%Y-%m-%d %H:%M')
+        except ValueError:
+            pass
+
+        # 斜杠格式 YYYY/MM/DD
+        try:
+            return datetime.strptime(time_str, '%Y/%m/%d')
+        except ValueError:
+            pass
+
+        # 解析失败，返回当前时间（保留数据）
+        self.logger.warning(f"⚠️ 时间解析失败('{time_str}')，已回退到今日时间")
+        return datetime.now()
+
     def _extract_pdf_content(self, detail_url: str) -> Tuple[Optional[str], Optional[str]]:
         """
         从详情页提取 PDF 内容
@@ -88,16 +140,22 @@ class CNInfoCrawler(BaseCrawler):
         return None, None
 
     def fetch(self) -> List[NewsItem]:
-        """抓取公告数据（下载 PDF 并解析）"""
+        """抓取公告数据（下载 PDF 并解析）
+
+        采集流程：
+        1. 全量提取公告列表
+        2. 按时间窗口过滤（默认24小时）
+        3. 逐个下载PDF并解析
+        """
         from playwright.sync_api import sync_playwright
         import os
 
         items = []
 
-        self.logger.info(f"开始采集巨潮资讯 - 股票代码: {self.stock_code}, 计划采集: {self.max_items}条")
+        self.logger.info(f"开始采集巨潮资讯 - 股票代码: {self.stock_code}")
+        self.logger.info(self.logger_info)  # 打印时间窗口信息
 
         # 创建批次目录
-        from datetime import datetime
         now = datetime.now()
         date_dir = now.strftime('%Y/%m/%d')
         batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
@@ -155,9 +213,22 @@ class CNInfoCrawler(BaseCrawler):
 
             self.logger.info(f"列表页提取到 {len(announcements)} 条公告")
 
-            # 限制数量，逐个处理
-            announcements = announcements[:self.max_items]
+            # 【改造】时间窗口过滤（全量采集后、处理详情前）
+            filtered = []
+            for ann in announcements:
+                if not ann['date']:
+                    continue
+                ann_date = self._parse_cninfo_time(ann['date'])
+                if ann_date >= self.cutoff_time:
+                    filtered.append(ann)
+                else:
+                    self.logger.debug(f"[时间过滤] {ann['title'][:40]}... ({ann['date']})")
 
+            before_count = len(announcements)
+            announcements = filtered
+            self.logger.info(f"时间过滤: {len(announcements)}/{before_count} 条（截止时间: {self.cutoff_time.strftime('%Y-%m-%d %H:%M')}）")
+
+            # 逐个处理（下载PDF等）
             for idx, ann in enumerate(announcements, 1):
                 if not ann['date'] or not ann['title']:
                     continue
@@ -208,21 +279,24 @@ class CNInfoCrawler(BaseCrawler):
 
             browser.close()
 
-        self.logger.info(f"采集完成: {len(items)} 条（含 PDF 和摘要）")
+        self.logger.info(f"采集完成: {len(items)} 条（全量采集+时间过滤后）")
         return items
 
 
 def main():
     """测试运行"""
     import os
-    max_items = int(os.getenv('CNINFO_MAX_ITEMS', '5'))
+
+    hours_window = int(os.getenv('CNINFO_HOURS_WINDOW', '24'))
     enable_summary = os.getenv('CNINFO_ENABLE_SUMMARY', 'true').lower() == 'true'
 
-    crawler = CNInfoCrawler(max_items=max_items, enable_summary=enable_summary)
+    crawler = CNInfoCrawler(hours_window=hours_window, enable_summary=enable_summary)
     items = crawler.run()
 
     print(f"\n{'='*70}")
-    print(f"采集结果: {len(items)} 条")
+    print(f"巨潮资讯采集结果: {len(items)} 条")
+    print(f"时间窗口: 过去{hours_window}小时")
+    print(f"截止时间: {crawler.cutoff_time.strftime('%Y-%m-%d %H:%M')}")
     print('='*70)
 
     for i, item in enumerate(items, 1):
