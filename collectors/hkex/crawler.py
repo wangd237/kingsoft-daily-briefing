@@ -28,30 +28,34 @@ class HKEXCrawler(BaseCrawler):
     source_code = "hkex"
     credibility_base = "【官方公告】"
 
-    def __init__(self, stock_codes: list[str] | None = None, hours_window: int = 24, enable_summary: bool | None = None):
+    def __init__(self, stock_codes: list[str] | None = None, hours_window: int | None = None, enable_summary: bool | None = None):
         """
         初始化
 
         Args:
-            stock_codes: 股票代码列表（默认 ['03888', '03896']）
-            hours_window: 只保留最近 N 小时的数据（默认24小时）
+            stock_codes: 股票代码列表（默认从配置读取）
+            hours_window: 只保留最近 N 小时的数据（默认从配置读取）
             enable_summary: 是否启用 AI 摘要（默认从配置读取）
         """
-        self.stock_codes = stock_codes or ['03888', '03896']
-        self.hours_window = hours_window
+        # 从配置读取
+        hkex_config = COLLECTORS.get('hkex', {})
+
+        # 股票配置
+        stocks_config = hkex_config.get('stocks', [
+            {'code': '03888', 'name': '金山软件'},
+            {'code': '03896', 'name': '金山云'},
+        ])
+        self.stock_codes = stock_codes or [s['code'] for s in stocks_config]
+        self.stock_names = {s['code']: s['name'] for s in stocks_config}
+
+        # 时间窗口（优先参数，其次配置，默认24）
+        self.hours_window = hours_window or hkex_config.get('hours_window', 24)
 
         # 计算截止时间
-        self.cutoff_time = datetime.now() - timedelta(hours=hours_window)
-        self.logger_info = f"时间窗口: 过去{hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
+        self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
+        self.logger_info = f"时间窗口: 过去{self.hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
 
-        # 股票代码到名称的映射
-        self.stock_names = {
-            '03888': '金山软件',
-            '03896': '金山云'
-        }
-
-        # 从配置读取 enable_summary，未设置则默认为 True
-        hkex_config = COLLECTORS.get('hkex', {})
+        # 是否启用 AI 摘要（优先参数，其次配置，默认True）
         _enable_summary = enable_summary if enable_summary is not None else hkex_config.get('enable_summary', True)
 
         # 初始化 PDF 处理器（不指定下载目录，后续动态设置）
@@ -176,7 +180,7 @@ class HKEXCrawler(BaseCrawler):
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
-                headless= False,  # 可视化浏览器，便于调试
+                headless= True,  
                 args=['--disable-blink-features=AutomationControlled', '--no-sandbox']
             )
 
