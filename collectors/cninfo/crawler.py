@@ -279,7 +279,7 @@ class CNInfoCrawler(BaseCrawler):
 
             browser.close()
 
-        self.logger.info(f"采集完成: {len(items)} 条（全量采集+时间过滤后）")
+        self.logger.info(f"采集完成: {len(items)} 条")
         return items
 
 
@@ -316,16 +316,6 @@ def main():
                 print(f"   摘要时间: {item.summary_generated_at.strftime('%Y-%m-%d %H:%M:%S')}")
         else:
             print(f"   AI摘要: [未生成]")
-
-        if item.content:
-            preview = item.content[:200].replace('\n', ' ') if len(item.content) > 200 else item.content
-            print(f"   内容预览: {preview}...")
-
-    print(f"\n{'='*70}")
-    print("数据结构：")
-    print("  - JSON文件：包含标题、日期、摘要、PDF路径")
-    print("  - output/data/pdfs/：下载的 PDF 文件")
-    print("="*70)
 
 
 if __name__ == "__main__":
