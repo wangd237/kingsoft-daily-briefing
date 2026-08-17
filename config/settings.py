@@ -241,6 +241,12 @@ TIME_FILTER = {
     'briefing_time': '09:30',
 }
 
+# 调度器配置（方案书 3.2.3）
+SCHEDULER = {
+    'timeout_seconds': 300,  # 单源采集超时上限（秒），超过则终止并标记 timeout
+    'max_workers': 4,        # 默认并发采集数
+}
+
 # 推送配置
 NOTIFIERS = {
     'email': {
