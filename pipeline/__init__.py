@@ -18,6 +18,34 @@ from models.news import NewsItem, DailyBriefing, CREDIBILITY_PRIORITY
 from config.settings import TIME_FILTER, BRIEFING_DIR
 
 
+# ---- L2 去重增强（方案书 3.5）：标题通用前后缀规则集 ----
+# 初始规则集，回测后可扩充；只匹配明确的新闻性修饰，避免误删正文关键词
+_TITLE_PREFIX_PATTERNS = [
+    re.compile(r'^(快讯|独家|最新|重磅|突发)\s*[:|｜]'),      # 快讯: xxx / 独家｜xxx
+    re.compile(r'^【(快讯|独家|最新|重磅|突发)】'),           # 【快讯】xxx
+    re.compile(r'^\[(快讯|独家|最新|重磅|突发)\]'),           # [快讯] xxx
+]
+_TITLE_SUFFIX_PATTERNS = [
+    re.compile(r'[|｜]\s*来源[:：]?\s*\S+$'),                 # xxx | 来源：东方财富
+    re.compile(r'\s*来源[:：]\s*\S+$'),                        # xxx 来源:东方财富
+]
+
+# opencc 实例缓存（繁转简），避免每次归一化都重建
+_OPENCC = None
+
+
+def _get_opencc():
+    """获取 opencc t2s 转换器；opencc 不可用时返回 None（降级跳过繁转简）"""
+    global _OPENCC
+    if _OPENCC is None:
+        try:
+            from opencc import OpenCC
+            _OPENCC = OpenCC('t2s')
+        except Exception:
+            _OPENCC = False
+    return _OPENCC or None
+
+
 class DataPipeline:
     """数据处理管道"""
 
@@ -92,8 +120,25 @@ class DataPipeline:
 
     @staticmethod
     def _normalize_title(title: str) -> str:
-        """标题归一化：去掉所有标点/空格，只保留中文、字母、数字"""
-        return re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title.lower())
+        """标题归一化（L2 增强，方案书 3.5）：
+        1. 繁转简（opencc，不可用时降级）
+        2. 去通用前后缀（快讯: / 独家| / 【快讯】 / | 来源：xxx）
+        3. 去掉所有标点/空格，只保留中文、字母、数字
+        """
+        if not title:
+            return ""
+        t = title
+        cc = _get_opencc()
+        if cc:
+            try:
+                t = cc.convert(t)
+            except Exception:
+                pass  # 转换失败时保留原文
+        for pat in _TITLE_PREFIX_PATTERNS:
+            t = pat.sub('', t)
+        for pat in _TITLE_SUFFIX_PATTERNS:
+            t = pat.sub('', t)
+        return re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', t.lower())
 
     def deduplicate(self, items: List[NewsItem]) -> List[NewsItem]:
         """
@@ -123,6 +168,9 @@ class DataPipeline:
         for key in order:
             item = by_url[key]
             tkey = self._normalize_title(item.title)
+            # 归一化后为空（如纯符号标题）时退化为 URL 分组，避免多条误归并
+            if not tkey:
+                tkey = f"__url__{item.url}"
             if tkey in by_title:
                 by_title[tkey] = better(by_title[tkey], item)
             else:
