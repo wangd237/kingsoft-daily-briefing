@@ -295,7 +295,7 @@ class Ali213Crawler(BaseCrawler):
                         if close_btn.count() > 0 and close_btn.is_visible():
                             close_btn.click()
                             new_page.wait_for_timeout(500)
-                            self.logger.info(f"[{keyword}] 已关闭广告弹窗")
+                            self.logger.debug(f"[{keyword}] 已关闭广告弹窗")
                             break
 
                     # 方法2: 按 ESC 键兜底
@@ -322,7 +322,7 @@ class Ali213Crawler(BaseCrawler):
                             if zixun_btn.count() > 0 and zixun_btn.is_visible():
                                 zixun_btn.click()
                                 new_page.wait_for_timeout(2000)
-                                self.logger.info(f"[{keyword}] 已点击'资讯'标签: {selector}")
+                                self.logger.debug(f"[{keyword}] 已点击'资讯'标签: {selector}")
                                 zixun_clicked = True
                                 break
                         except Exception:
