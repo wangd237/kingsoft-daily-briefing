@@ -5,9 +5,10 @@
 支持多关键词搜索、详情页正文抓取、AI 摘要
 """
 import sys
-import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+# 强制 UTF-8 输出：用 reconfigure 改编码，不替换 sys.stdout/stderr 对象
+# （替换后原对象被 GC 会关闭共享 buffer，导致 print 抛 "I/O operation on closed file"）
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 
 from datetime import datetime, timedelta
 from typing import List, Dict, Set, Optional

@@ -4,7 +4,6 @@
 使用 Playwright 浏览器自动化
 采集临时公告和定期报告，支持PDF下载和AI摘要
 """
-import io
 import re
 import sys
 import os
@@ -16,7 +15,9 @@ from urllib.parse import urljoin
 
 from playwright.sync_api import sync_playwright
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# 强制 UTF-8 输出：用 reconfigure 改编码，不替换 sys.stdout 对象
+# （替换后原对象被 GC 会关闭共享 buffer，导致 print 抛 "I/O operation on closed file"）
+sys.stdout.reconfigure(encoding='utf-8')
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from collectors.base import BaseCrawler
