@@ -54,7 +54,8 @@ class BaseCrawler(ABC):
         self.log_dir = log_dir
         self.logger = self._setup_logger()
         self.items: List[NewsItem] = []
-        self._batch_dir: Optional[str] = None
+        # 支持调度器注入批次目录（BATCH_DIR 环境变量），未注入时为 None
+        self._batch_dir: Optional[str] = os.getenv("BATCH_DIR")
         self.enable_summary = enable_summary  # 保存 enable_summary 属性
 
         # 初始化 AI 摘要器（如果启用）

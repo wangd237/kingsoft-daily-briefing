@@ -276,7 +276,8 @@ class WindCrawler(BaseCrawler):
         now = datetime.now()
         date_dir = now.strftime('%Y/%m/%d')
         batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
-        self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
+        if not self._batch_dir:
+            self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
         os.makedirs(self._batch_dir, exist_ok=True)
 
         try:
