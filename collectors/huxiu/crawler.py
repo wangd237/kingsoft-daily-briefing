@@ -517,7 +517,7 @@ class HuxiuCrawler(BaseCrawler):
 
         with sync_playwright() as p:
             # 与 test.py 保持一致的最小浏览器配置
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=True)
 
             context = browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
