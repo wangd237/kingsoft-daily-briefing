@@ -22,8 +22,12 @@ BRIEFING_DIR = OUTPUT_DIR / "briefings"
 LOG_DIR = OUTPUT_DIR / "logs"
 REPORT_DIR = OUTPUT_DIR / "reports"
 
+# 主产物与附件归集（方案书 3.4.2 / 3.4.3）
+LATEST_JSON = OUTPUT_DIR / "latest.json"
+LATEST_ATTACHMENTS_DIR = OUTPUT_DIR / "latest_attachments"
+
 # 确保目录存在
-for dir_path in [OUTPUT_DIR, DATA_DIR, BRIEFING_DIR, LOG_DIR, REPORT_DIR]:
+for dir_path in [OUTPUT_DIR, DATA_DIR, BRIEFING_DIR, LOG_DIR, REPORT_DIR, LATEST_ATTACHMENTS_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
 # 采集器配置
@@ -237,7 +241,7 @@ CATEGORIES = {
 
 # 时间过滤配置
 TIME_FILTER = {
-    'default_hours': 48,
+    'default_hours': 24,  # 汇总层统一 24h 兜底（方案书 5.2 决策点 #2，由 48 改为 24）
     'briefing_time': '09:30',
 }
 
