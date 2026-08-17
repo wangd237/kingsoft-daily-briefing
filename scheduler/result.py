@@ -62,6 +62,7 @@ class RunSummary:
     sources: Dict[str, CrawlerResult] = field(default_factory=dict)
     stats: Dict[str, int] = field(default_factory=dict)
     items: List[dict] = field(default_factory=list)
+    news_items: list = field(default_factory=list)  # 去重后 NewsItem（模块 E 简报用，不进 latest.json）
 
     def add_source(self, result: CrawlerResult):
         self.sources[result.source_code] = result

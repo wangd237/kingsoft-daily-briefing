@@ -9,7 +9,16 @@
 - 状态判定：ok / failed / warning / timeout（方案书 3.2.2）
 - 失败提示 + 调度器日志（output/logs/scheduler/，方案书 3.4.6）
 
-模块 D：汇总与主产物；模块 E：简报与运行报告（后续实现）
+模块 D：汇总与主产物
+- 汇总：只扫各源 _latest → 24h 过滤 → 去重（L1 + L2）→ 排序
+- 主产物：output/latest.json（sources + stats + items）
+- 附件归集：output/latest_attachments/（PDF 扁平拷贝）
+- CLI 语义：--skip-collect 只汇总 / --dry-run 只采集
+
+模块 E：简报与运行报告
+- 简报：复用 generate_briefing -> output/briefings/{YYYY}/{MM}/briefing_{YYYYMMDD}.md（--no-briefing 跳过）
+- 运行报告：output/reports/run_{YYYYMMDD_HHMMSS}.json（每源详细状态 + 汇总统计）
+- 日志：output/logs/scheduler/（3.4.6）
 """
 import json
 import logging
@@ -84,10 +93,13 @@ def _clean_latest(batch_dir: str) -> None:
 # ---------------------------------------------------------------- 单源运行
 
 def _decode_output(raw: Optional[bytes]) -> str:
-    """Windows 编码兼容：按 UTF-8 解码，非法字节替换（3.2.4）"""
+    """Windows 编码兼容：先按 UTF-8 解码，失败回退 GBK（3.2.4）"""
     if not raw:
         return ""
-    return raw.decode("utf-8", errors="replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("gbk", errors="replace")
 
 
 def _tail(raw: Optional[bytes], max_chars: int = 500) -> str:
@@ -250,25 +262,56 @@ def run(args) -> int:
     )
     max_workers = args.max_workers or SCHEDULER.get("max_workers", 4)
 
-    # --skip-collect：只汇总不采集（汇总逻辑属模块 D，尚未实现）
-    if args.skip_collect:
-        print("[INFO] --skip-collect: 汇总模块（模块 D）尚未实现")
+    # 采集编排（模块 C）：--skip-collect 时跳过，只做汇总
+    results: Dict[str, CrawlerResult] = {}
+    if not args.skip_collect:
+        results = collect(sources, max_workers, timeout_seconds, logger)
+
+        # 采集汇总提示
+        stats = _summarize(results)
+        logger.info(f"采集完成: {stats}")
+        print(
+            f"\n采集完成: 共 {stats['total']} 个源 | 成功 {stats['ok']} | "
+            f"失败 {stats['failed']} | 警告 {stats['warning']} | 超时 {stats['timeout']}"
+        )
+
+    # 汇总与主产物（模块 D）：--dry-run 只采集不汇总
+    if args.dry_run:
+        logger.info("--dry-run: 只采集不汇总")
         return 0
 
-    # 采集编排（模块 C）
-    results = collect(sources, max_workers, timeout_seconds, logger)
+    logger.info("开始汇总与主产物（模块 D）...")
+    from scheduler.summarizer import run_summary
 
-    # 汇总提示
-    stats = _summarize(results)
-    logger.info(f"采集完成: {stats}")
-    print(
-        f"\n采集完成: 共 {stats['total']} 个源 | 成功 {stats['ok']} | "
-        f"失败 {stats['failed']} | 警告 {stats['warning']} | 超时 {stats['timeout']}"
+    summary = run_summary([s.code for s in sources], results, logger)
+    logger.info(
+        f"汇总完成: raw={summary.stats.get('raw')} "
+        f"after_time={summary.stats.get('after_time')} "
+        f"after_dedup={summary.stats.get('after_dedup')} "
+        f"attachments={summary.stats.get('attachments')}"
     )
+    print(f"\n汇总完成: {len(summary.items)} 条进入 latest.json")
 
-    # 汇总与主产物（模块 D）：--dry-run 与默认在模块 C 阶段行为一致（只采集）
-    if args.dry_run:
-        logger.info("--dry-run: 只采集不汇总（模块 D 落地后区分）")
+    # ---- 模块 E：简报 + 运行报告（3.4.4 / 3.4.5） ----
+    briefing_path = None
+    if args.no_briefing:
+        logger.info("--no-briefing: 跳过简报生成")
     else:
-        logger.info("汇总模块（模块 D）尚未实现，本次仅完成采集编排")
+        from scheduler.briefing import generate_briefing
+
+        briefing_path = generate_briefing(summary.news_items, logger)
+        print(f"简报已生成: {briefing_path}")
+
+    from scheduler.reporter import write_run_report
+
+    report_path = write_run_report(
+        run_id=summary.run_id,
+        date=summary.date,
+        generated_at=summary.generated_at,
+        results=summary.sources,
+        stats=summary.stats,
+        briefing_path=briefing_path,
+        logger=logger,
+    )
+    print(f"运行报告: {report_path}")
     return 0
