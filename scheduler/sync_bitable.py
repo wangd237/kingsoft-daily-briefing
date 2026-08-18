@@ -48,7 +48,7 @@ MAX_BASE64_BYTES = 15 * 1024 * 1024
 ATTACH_FIELD = "附件"
 
 # 记录接口路径（以官方文档为准，联调如有出入只改这里）
-API_RECORDS_GET = "/v7/coop/dbsheet/{file_id}/sheets/{sheet_id}/records/list_by_page"
+API_RECORDS_GET = "/v7/coop/dbsheet/{file_id}/sheets/{sheet_id}/records"
 API_RECORDS_CREATE = "/v7/coop/dbsheet/{file_id}/sheets/{sheet_id}/records/create"
 API_RECORDS_UPDATE = "/v7/coop/dbsheet/{file_id}/sheets/{sheet_id}/records/update"
 
@@ -156,18 +156,18 @@ class BitableClient:
 
     def list_records(self, date: Optional[str] = None) -> List[dict]:
         """查记录。date 非空时仅返回该日期的记录（upsert 主键）。"""
-        # 官方 list_by_page 请求体：page_num 必填（从 1 起），filter 用 mode/criteria 结构
+        # 官方列举记录请求体：游标分页 page_size + page_token（首页不传/传空），filter 用 mode/criteria 结构
         body: Dict[str, Any] = {
             "prefer_id": False,
-            "page_num": 1,
             "page_size": 100,
+            "page_token": "",
             "fields": [],
             "filter": None,
         }
         if date:
             body["filter"] = {
                 "mode": "AND",
-                "criteria": [{"field_name": "日期", "operator": "is", "value": [date]}],
+                "criteria": [{"field": "日期", "operator": "Equals", "values": [date]}],
             }
         data = self._request("POST", API_RECORDS_GET, body)
         # 响应结构以官方为准：常见形态 data.records[]（含 record_id 与 fields）
