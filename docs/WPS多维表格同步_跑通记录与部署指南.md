@@ -30,22 +30,19 @@
 
 ---
 
-## 2. 跑通的方法与关键结论（踩坑全记录）
+## 2. 跑通的方法与关键结论
 
 ### 2.1 授权模式：必须用「用户级 token」，应用 token 走不通
 
 | 结论 | 说明 |
 |---|---|
-| dbsheet 是**用户级**数据接口 | 用应用 token（`client_credentials`）调任何 dbsheet 接口都返回 `403 unable to read user permission`，这条路**根本不通**，不是签名/参数问题 |
+| dbsheet 是**用户级**数据接口 | 用应用 token 调任何 dbsheet 接口都返回 `403 unable to read user permission`，这条路**根本不通**，不是签名/参数问题 |
 | 必须走 OAuth **授权码模式** | `scripts/wps_authorize.py` 完成浏览器授权 → 拿到用户 `access_token` + `refresh_token` |
 
 ### 2.2 scope 权限：app 与 user 是两套独立 scope
 
 - 在开发者后台「权限管理」里，同一 scope 名会分 **`app` 类型**和 **`user` 类型**两行，分别对应应用 token 和用户授权。
-- 我们用的是 `user` 类型：
-  - `kso.dbsheet.read`（user）—— 已开通
-  - `kso.dbsheet.readwrite`（user）—— **必须手动点「申请开通」**（填用途说明）
-- 未申请时授权链接直接报 `40000005 invalid_scope`（官方文档：scope 需先在后台申请开通，否则授权服务器拒绝）。
+- 需要申请 `user` 类型。
 - 授权脚本 scope 固定为 `kso.dbsheet.readwrite,kso.dbsheet.read`（配置在 `config/settings.py` 的 `BITABLE.scope`）。
 
 ### 2.3 回调地址
@@ -75,10 +72,77 @@ signature = HMAC-SHA256(APP_KEY,
 
 ### 2.5 token 生命周期与自动刷新
 
-- `access_token` 约 2 小时有效；`refresh_token` 约 365 天有效。
-- 持久化在 `output/wps_token.json`（结构：`access_token / refresh_token / expires_at / refresh_expires_at`，`expires_at` 预留了 10 分钟余量提前刷新）。
-- `sync_bitable` 每次请求自动：内存缓存 → 文件读取 → 过期用 refresh_token 刷新并回写文件。
-- **refresh_token 过期后**需重新跑 `python scripts/wps_authorize.py` 再次浏览器授权。
+#### 2.5.1 两个 token 的关系
+
+WPS 授权后会发**两个**凭证，角色完全不同：
+
+| token | 作用 | 有效期 | 类比 |
+|---|---|---|---|
+| `access_token` | 每次调 dbsheet API 时放进 `Authorization: Bearer` 头的"门票" | 约 **2 小时** | 临时门票 |
+| `refresh_token` | 拿它去换新的 access_token 的"长期会员卡" | 约 **365 天** | 长期凭证 |
+
+关键点：**access_token 过期后不用重新授权**——只要 refresh_token 还活着，就能"静默续票"。
+
+#### 2.5.2 一次完整的时间线（以 15:00 授权为例）
+
+```text
+15:00  授权成功，写入 output/wps_token.json：
+       access_token = A1     expires_at = 16:50   （2h - 10min 余量）
+       refresh_token = R1    refresh_expires_at = 明年 8 月
+
+15:05  第一次同步 → 用 A1（命中文件缓存）
+16:55  A1 已过期（过了 expires_at=16:50）
+       → 自动拿 R1 调 POST /oauth2/token (grant_type=refresh_token)
+       → 换回 A2（新的）+ R2（新的，顺带续命）
+       → 更新 wps_token.json，继续用 A2 正常请求
+
+明年某天  R1/R2 也过期了
+       → 刷新失败 → 报"用户 token 已失效，请重新授权"
+       → 人工重跑 python scripts/wps_authorize.py
+```
+
+#### 2.5.3 每次请求取 token 的决策链（`BitableClient._get_token()`）
+
+```text
+有请求进来
+  │
+  ├─ ① 内存里有 token 且未到 TOKEN_TTL_SECONDS（2h-10min）？
+  │     → 直接用（同一次进程内省去读文件）
+  │
+  ├─ ② 读 wps_token.json，access_token 存在且 now < expires_at？
+  │     → 用之（跨进程/重启后命中磁盘缓存）
+  │
+  ├─ ③ 文件里有 refresh_token？
+  │     → 调 /oauth2/token，grant_type=refresh_token
+  │     → 成功：新 token 整体写回文件，用之
+  │     → 失败（refresh 也过期）：抛"请重新授权"
+  │
+  └─ ④ 什么都没有 → 抛"缺少用户 access_token，请先运行授权脚本"
+```
+
+持久化结构（`_normalize_token_data()`，注意两个过期点计算）：
+
+```python
+{
+    "access_token": "...",
+    "refresh_token": "...",
+    "expires_at": now + expires_in - 600,            # access 过期点，提前 10 分钟算作过期
+    "refresh_expires_at": now + refresh_expires_in,  # refresh 过期点
+}
+```
+
+#### 2.5.4 三个设计细节（为什么这样做）
+
+1. **预留 10 分钟余量**：access_token 有效期 2 小时，但请求从发出到服务端处理有延迟，若恰好卡在"刚过期"边界会 401。提前 10 分钟当"已过期"去刷新，换取完整新周期，避免边界失败（`TOKEN_TTL_SECONDS = 2*3600 - 600` 同理）。
+2. **刷新时把 refresh_token 也换新**：WPS 刷新接口返回一对新 token（新 access + 新 refresh），代码整体覆盖写回文件 → refresh_token 每次刷新**顺带续命**。只要 365 天内至少成功刷新过一次，就永远不会自然过期；**只有连续 365 天没跑过同步才需要人工重新授权**。日常每天定时跑基本永远不会碰到。
+3. **单文件持久化**：`output/wps_token.json` 是授权脚本与同步脚本共享的唯一 token 载体，跨进程/重启后仍能续用。
+
+#### 2.5.5 部署时与生命周期相关的注意点
+
+1. **token 文件是敏感文件**：`output/wps_token.json` 相当于登录态，别进 git、别外发；换机/重装时把整个 `output/` 拷走即可免重新授权（前提是 refresh 没过期）。
+2. **部署机时钟必须准**：`expires_at` 是本地时间戳对比，机器时间严重偏差会导致"明明没过期却被判定过期"或反之。
+3. **一个 refresh_token 不要多机共用**：多机同时刷新会互相覆盖文件，可能拿旧 token 顶掉新的，建议单机部署或各机独立授权。
+4. **报错提示即行动指引**：遇到 `用户 token 已失效，请重新授权: python scripts/wps_authorize.py` 就是 refresh 过期了，走一次浏览器授权即可，代码无需改动。
 
 ### 2.6 upsert（一天一行）
 
@@ -158,10 +222,8 @@ AI_MODEL=
 
 ### 4.3 第三步：WPS 开放平台准备（一次性，且只有表格管理员能做）
 
-1. 在 [open.wps.cn](https://open.wps.cn) 创建/使用**企业应用**，拿到 `client_id` / `client_secret`。
-2. **权限管理**：搜索 `kso.dbsheet`，确保 **`user` 类型**的 `kso.dbsheet.read` 和 `kso.dbsheet.readwrite` 都「已开通」。
-   - ⚠️ 只申请 `app` 类型没用，dbsheet 必须 user 类型（见 §2.2）。
-   - ⚠️ 没申请时，授权链接直接报 `invalid_scope`，**不是代码问题**。
+1. 在 [open.wps.cn](https://open.wps.cn) 创建/使用**企业应用**，拿到 `应用id` / `应用秘钥`。
+2. **权限管理**：确保 **`user` 类型**的 `查询和管理多维表格`「已开通」。
 3. **安全配置 → 用户授权回调配置**：添加 `http://127.0.0.1:8765/callback`。
 4. 确认目标表结构（字段名必须一字不差）：
 
