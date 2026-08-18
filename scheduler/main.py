@@ -37,6 +37,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="跳过简报生成",
     )
     parser.add_argument(
+        "--sync-bitable", action="store_true",
+        help="汇总后同步到 WPS 多维表格（M2）",
+    )
+    parser.add_argument(
+        "--sync-dry-run", action="store_true",
+        help="只打印待同步记录不调用 API（需与 --sync-bitable 或 --sync-only 搭配）",
+    )
+    parser.add_argument(
+        "--sync-only", action="store_true",
+        help="只做多维表格同步（读取现有 latest.json，不采集不汇总）",
+    )
+    parser.add_argument(
         "--list-sources", action="store_true",
         help="打印启用源清单后退出，不运行",
     )
@@ -70,6 +82,12 @@ def main(argv=None) -> int:
         for s in sources:
             print(f"  {s.code:<18}{s.name}")
         return 0
+
+    # 仅多维表格同步模式：读取现有 latest.json，不采集不汇总
+    if args.sync_only:
+        from scheduler.sync_bitable import sync_to_bitable
+
+        return sync_to_bitable(dry_run=args.sync_dry_run)
 
     # 其他模式：编排逻辑由 orchestrator 实现（模块 C）
     try:
