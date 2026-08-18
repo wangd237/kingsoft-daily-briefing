@@ -312,4 +312,12 @@ def run(args) -> int:
         briefing_path=briefing_path,
         logger=logger,
     )
+
+    # ---- 模块 F：WPS 多维表格同步（M2） ----
+    # 独立对接层，失败仅告警，不影响本地产物
+    if getattr(args, "sync_bitable", False):
+        from scheduler.sync_bitable import sync_to_bitable
+
+        logger.info("开始同步 WPS 多维表格（模块 F）...")
+        sync_to_bitable(dry_run=getattr(args, "sync_dry_run", False), logger=logger)
     return 0
