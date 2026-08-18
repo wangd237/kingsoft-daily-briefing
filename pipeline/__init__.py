@@ -201,8 +201,10 @@ class DataPipeline:
         self.items = items
         return items
 
-    def generate_briefing(self, date: str = None) -> str:
-        """生成简报"""
+    def generate_briefing(self, date: str = None, quiet: bool = False) -> str:
+        """生成简报
+        :param quiet: 为 True 时不打印"简报已保存"（供调度器调用，避免日志重复）
+        """
         if date is None:
             date = datetime.now().strftime('%Y年%m月%d日')
 
@@ -226,7 +228,8 @@ class DataPipeline:
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(md_content)
 
-        print(f"\n简报已保存: {file_path}")
+        if not quiet:
+            print(f"\n简报已保存: {file_path}")
         return md_content
 
 
