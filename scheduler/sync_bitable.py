@@ -14,6 +14,13 @@ WPS 多维表格同步（sync_bitable）— 模块 F（M2 对接）
     WPS_FILE_ID     目标多维表格 file_id（表格 URL 中可查）
     WPS_SHEET_ID    目标工作表 sheet_id
 
+授权说明（重要）：
+- dbsheet 是"用户级"数据接口：应用 token（client_credentials）只能换来
+  403 unable to read user permission，必须使用用户 access_token（OAuth 授权码模式）。
+- 首次运行 scripts/wps_authorize.py 完成一次浏览器授权，把用户 token 持久化到
+  output/wps_token.json（access_token 约 2h，refresh_token 约 365 天）；
+  之后脚本自动读文件、过期自动刷新，无需再次授权。
+
 说明：
 - 数据接口除 access_token 外还需 KSO-1 签名请求头，见 BitableClient._sign()。
 - WPS 开放 API 的具体路径/参数以 open.wps.cn 官方文档（API 调试台）为准；
@@ -37,7 +44,7 @@ from config.settings import BITABLE, LATEST_ATTACHMENTS_DIR, LATEST_JSON
 
 # ---------------------------------------------------------------- 常量
 
-# 租户级 access_token 有效期约 2 小时，留 10 分钟余量提前刷新
+# 用户级 access_token 有效期约 2 小时，留 10 分钟余量提前刷新
 TOKEN_TTL_SECONDS = 2 * 3600 - 600
 
 # base64 直写单文件上限（保守取值：官方单文件 20MB 限制通常指 base64 串长度，
@@ -58,7 +65,7 @@ class BitableSyncError(Exception):
 
 
 class BitableClient:
-    """WPS 多维表格 API 客户端（租户级 token + KSO-1 签名）"""
+    """WPS 多维表格 API 客户端（用户级 token + KSO-1 签名）"""
 
     def __init__(
         self,
@@ -67,6 +74,7 @@ class BitableClient:
         file_id: str,
         sheet_id: str,
         base_url: str = "https://openapi.wps.cn",
+        token_file: Optional[Path] = None,
         logger: Optional[logging.Logger] = None,
     ):
         self.app_id = app_id
@@ -74,34 +82,91 @@ class BitableClient:
         self.file_id = file_id
         self.sheet_id = sheet_id
         self.base_url = base_url.rstrip("/")
+        self.token_file = token_file or Path(
+            BITABLE.get("token_file", "output/wps_token.json")
+        )
         self.logger = logger or logging.getLogger("sync_bitable")
         self._token: Optional[str] = None
         self._token_ts: float = 0.0
 
     # ---------------- token ----------------
+    # 说明：dbsheet 是"用户级"数据接口，必须用用户 access_token（OAuth 授权码模式），
+    # 应用 token（client_credentials）只能换来 403 unable to read user permission。
+    # 首次运行 scripts/wps_authorize.py 换取用户 token 并持久化到 token_file，
+    # 之后 access_token 过期自动用 refresh_token 刷新（refresh_token 有效期 365 天）。
 
-    def _get_token(self) -> str:
-        """获取租户级 access_token（client_credentials），带缓存"""
-        if self._token and (time.time() - self._token_ts) < TOKEN_TTL_SECONDS:
-            return self._token
+    def _load_token_file(self) -> Dict[str, Any]:
+        """读取本地持久化的用户 token（默认 output/wps_token.json）"""
+        path = self.token_file
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_token_file(self, data: Dict[str, Any]) -> None:
+        """持久化用户 token，供授权脚本与同步脚本共享"""
+        path = self.token_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _normalize_token_data(data: Dict[str, Any]) -> Dict[str, Any]:
+        """把 oauth2/token 响应转成内部持久化结构（含过期时间戳，预留 10 分钟余量）"""
+        now = time.time()
+        return {
+            "access_token": data.get("access_token", ""),
+            "refresh_token": data.get("refresh_token", ""),
+            "expires_at": now + float(data.get("expires_in", TOKEN_TTL_SECONDS)) - 600,
+            "refresh_expires_at": now + float(data.get("refresh_expires_in", 31536000)),
+        }
+
+    def _refresh_token(self, refresh_token: str) -> Dict[str, Any]:
+        """用 refresh_token 刷新用户 access_token（refresh_token 有效期约 365 天）"""
         resp = requests.post(
             f"{self.base_url}/oauth2/token",
             data={
-                "grant_type": "client_credentials",
+                "grant_type": "refresh_token",
                 "client_id": self.app_id,
                 "client_secret": self.app_key,
+                "refresh_token": refresh_token,
             },
             timeout=30,
         )
         if resp.status_code != 200:
-            raise BitableSyncError(f"获取 access_token 失败: HTTP {resp.status_code} {resp.text[:300]}")
+            raise BitableSyncError(
+                f"刷新 access_token 失败: HTTP {resp.status_code} {resp.text[:300]}"
+            )
         data = resp.json()
-        token = data.get("access_token")
-        if not token:
-            raise BitableSyncError(f"access_token 响应缺少 access_token: {data}")
-        self._token = token
-        self._token_ts = time.time()
-        return token
+        if not data.get("access_token"):
+            raise BitableSyncError(f"刷新 access_token 响应缺少 access_token: {data}")
+        return self._normalize_token_data(data)
+
+    def _get_token(self) -> str:
+        """获取用户级 access_token：内存缓存 → 文件持久化 → refresh_token 自动刷新"""
+        if self._token and (time.time() - self._token_ts) < TOKEN_TTL_SECONDS:
+            return self._token
+        stored = self._load_token_file()
+        now = time.time()
+        if stored.get("access_token") and now < float(stored.get("expires_at", 0)):
+            self._token = stored["access_token"]
+            self._token_ts = now
+            return self._token
+        if stored.get("refresh_token"):
+            try:
+                refreshed = self._refresh_token(stored["refresh_token"])
+            except BitableSyncError as e:
+                raise BitableSyncError(
+                    f"用户 token 已失效，请重新授权: python scripts/wps_authorize.py（{e}）"
+                ) from e
+            self._save_token_file(refreshed)
+            self._token = refreshed["access_token"]
+            self._token_ts = time.time()
+            return self._token
+        raise BitableSyncError(
+            "缺少用户 access_token，请先运行授权脚本: python scripts/wps_authorize.py"
+        )
 
     # ---------------- KSO-1 签名 ----------------
 
@@ -176,7 +241,8 @@ class BitableClient:
 
     def create_record(self, fields: Dict[str, Any]) -> str:
         """创建记录，返回 record_id"""
-        # 官方 create 请求体：records 数组包裹，fields_value 为 JSON 字符串
+        # 官方 create 请求体：records 数组包裹，fields_value 为 JSON 字符串；
+        # 响应结构 data.records[]，记录 ID 在 records[0].id（实测不是 record_id 顶层字段）
         data = self._request(
             "POST", API_RECORDS_CREATE,
             {
@@ -184,7 +250,10 @@ class BitableClient:
                 "records": [{"fields_value": json.dumps(fields, ensure_ascii=False)}],
             },
         )
-        record_id = data.get("data", {}).get("record_id") or data.get("data", {}).get("id")
+        records = (data.get("data") or {}).get("records") or []
+        if not records:
+            raise BitableSyncError(f"创建记录响应缺少 records: {data}")
+        record_id = records[0].get("id") or records[0].get("record_id")
         if not record_id:
             raise BitableSyncError(f"创建记录响应缺少 record_id: {data}")
         return record_id
@@ -252,6 +321,16 @@ def load_latest() -> Tuple[Dict[str, Any], List[Path]]:
     return latest, files
 
 
+def _to_time_value(iso_value: str) -> str:
+    """Time 类型字段只接受 HH:mm:ss；把 ISO 时间戳截取时刻部分（解析失败原样兜底）"""
+    if not iso_value:
+        return ""
+    try:
+        return datetime.fromisoformat(iso_value).strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return iso_value
+
+
 def build_record(latest: Dict[str, Any], attachment_files: List[Path]) -> Dict[str, Any]:
     """
     构建"一天一行"记录（列名以建表时的字段名为准，见 BITABLE.field_map）。
@@ -286,8 +365,10 @@ def build_record(latest: Dict[str, Any], attachment_files: List[Path]) -> Dict[s
         field_map.get("attachments", ATTACH_FIELD): attachment_files,
         field_map.get("sources_status", "源状态"): sources_status,
         field_map.get("stats", "统计"): stats_text,
-        field_map.get("run_id", "运行ID"): latest.get("run_id", ""),
-        field_map.get("generated_at", "采集时间"): latest.get("generated_at", ""),
+        field_map.get("run_id", "运行id"): latest.get("run_id", ""),
+        field_map.get("generated_at", "采集时间"): _to_time_value(
+            str(latest.get("generated_at", ""))
+        ),
     }
 
 
