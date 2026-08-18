@@ -251,6 +251,31 @@ SCHEDULER = {
     'max_workers': 4,        # 默认并发采集数
 }
 
+# WPS 多维表格对接（M2，总调度器与汇总实施方案.md 模块 M2）
+# 凭证来自 open.wps.cn 企业应用，可在 .env 中覆盖：
+#   WPS_APP_ID / WPS_APP_KEY / WPS_FILE_ID / WPS_SHEET_ID
+BITABLE = {
+    # 启用开关：由 .env WPS_SYNC_ENABLED=1 控制（默认关闭），无需改代码
+    'enabled': os.environ.get('WPS_SYNC_ENABLED', '0') == '1',
+    'base_url': 'https://openapi.wps.cn',
+    'app_id': os.environ.get('WPS_APP_ID', ''),
+    'app_key': os.environ.get('WPS_APP_KEY', ''),
+    'file_id': os.environ.get('WPS_FILE_ID', ''),
+    'sheet_id': os.environ.get('WPS_SHEET_ID', ''),
+    # 附件方案 A：当天全部 PDF 挂到一个"附件"字段
+    'attach_field': '附件',
+    # 列名 -> 含义（建表时字段名需与此一致；如有改动只改这里）
+    'field_map': {
+        'date': '日期',
+        'briefing': '简报内容',
+        'attachments': '附件',
+        'sources_status': '源状态',
+        'stats': '统计',
+        'run_id': '运行id',
+        'generated_at': '采集时间',
+    },
+}
+
 # 推送配置
 NOTIFIERS = {
     'email': {
