@@ -262,6 +262,12 @@ BITABLE = {
     'app_key': os.environ.get('WPS_APP_KEY', ''),
     'file_id': os.environ.get('WPS_FILE_ID', ''),
     'sheet_id': os.environ.get('WPS_SHEET_ID', ''),
+    # OAuth 用户授权：dbsheet 是用户级接口，必须用用户 access_token（不能用应用 token）
+    # 首次运行 scripts/wps_authorize.py 换取并持久化到 token_file，之后自动刷新
+    'authorize_url': 'https://openapi.wps.cn/oauth2/auth',
+    'scope': 'kso.dbsheet.readwrite,kso.dbsheet.read',
+    'redirect_uri': os.environ.get('WPS_REDIRECT_URI', 'http://127.0.0.1:8765/callback'),
+    'token_file': OUTPUT_DIR / 'wps_token.json',
     # 附件方案 A：当天全部 PDF 挂到一个"附件"字段
     'attach_field': '附件',
     # 列名 -> 含义（建表时字段名需与此一致；如有改动只改这里）
