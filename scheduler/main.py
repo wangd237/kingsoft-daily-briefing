@@ -62,8 +62,7 @@ def main(argv=None) -> int:
         missing = validate_sources(sources)
         if missing:
             print(
-                f"[ERROR] 以下源模块缺失（collectors/{code}/crawler.py）: "
-                f"{', '.join(missing)}",
+                f"[ERROR] 以下源模块缺失（{', '.join(f'collectors/{c}/crawler.py' for c in missing)}）",
                 file=sys.stderr,
             )
             return 1

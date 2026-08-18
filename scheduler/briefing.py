@@ -23,7 +23,7 @@ def generate_briefing(items: List[NewsItem], logger: logging.Logger) -> Path:
     now = datetime.now()
     pipeline = DataPipeline(hours=TIME_FILTER.get("default_hours", 24))
     pipeline.items = list(items)
-    pipeline.generate_briefing(date=now.strftime("%Y年%m月%d日"))
+    pipeline.generate_briefing(date=now.strftime("%Y年%m月%d日"), quiet=True)
 
     path = BRIEFING_DIR / now.strftime("%Y") / now.strftime("%m") / now.strftime("briefing_%Y%m%d.md")
     logger.info(f"[简报] {len(items)} 条 -> {path}")

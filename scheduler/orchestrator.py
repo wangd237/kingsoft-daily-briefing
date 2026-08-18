@@ -300,7 +300,6 @@ def run(args) -> int:
         from scheduler.briefing import generate_briefing
 
         briefing_path = generate_briefing(summary.news_items, logger)
-        print(f"简报已生成: {briefing_path}")
 
     from scheduler.reporter import write_run_report
 
@@ -313,5 +312,4 @@ def run(args) -> int:
         briefing_path=briefing_path,
         logger=logger,
     )
-    print(f"运行报告: {report_path}")
     return 0
