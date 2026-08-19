@@ -576,7 +576,7 @@ class KingsoftOfficeIRCrawler(BaseCrawler):
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
-                headless=False,
+                headless=True,
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--disable-web-security',
