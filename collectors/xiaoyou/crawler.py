@@ -184,7 +184,7 @@ class XiaoyouCrawler(BaseCrawler):
         )
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=False)
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 user_agent=(
@@ -301,7 +301,7 @@ def main():
     """测试运行"""
     import os
 
-    hours_window = int(os.getenv('XIAOYOU_HOURS_WINDOW', '24'))
+    hours_window = int(os.getenv('XIAOYOU_HOURS_WINDOW', '48'))
     crawler = XiaoyouCrawler(hours_window=hours_window)
     items = crawler.run()
 
