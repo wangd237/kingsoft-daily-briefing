@@ -40,7 +40,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from config.settings import BITABLE, LATEST_ATTACHMENTS_DIR, LATEST_JSON
+from config.settings import (
+    BITABLE,
+    CATEGORIES,
+    COLLECTORS,
+    LATEST_ATTACHMENTS_DIR,
+    LATEST_JSON,
+)
 
 # ---------------------------------------------------------------- 常量
 
@@ -331,6 +337,75 @@ def _to_time_value(iso_value: str) -> str:
         return iso_value
 
 
+# ---------------------------------------------------------------- 简报内容清洗（L1）
+
+# 分类展示顺序（与 config/settings.py CATEGORIES 定义顺序一致）
+CATEGORY_ORDER = list(CATEGORIES.keys())
+# 未命中 5 类的条目归入该兜底分类（客观真实：不丢弃，单独列出）
+FALLBACK_CATEGORY = "其他"
+
+# 可信度优先级：官方公告 > 官方资讯 > 媒体报道（未知兜底排最后）
+CREDIBILITY_ORDER = {"【官方公告】": 0, "【官方资讯】": 1, "【媒体报道】": 2}
+
+
+def _source_display_name(source_code: str) -> str:
+    """source_code -> 源中文名（settings.COLLECTORS 有配置则用之，否则保留代号）"""
+    if not source_code:
+        return "未知来源"
+    cfg = COLLECTORS.get(source_code)
+    return (cfg or {}).get("name") or source_code
+
+
+def _parse_publish_ts(value) -> Optional[float]:
+    """解析发布时间为时间戳；无效/缺失返回 None（排序时兜底放组内末尾）"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_cleaned_briefing(items: List[Dict[str, Any]]) -> str:
+    """
+    L1 简报内容清洗：按分类分组 + 组内按可信度/时间排序 + 编号 + 来源中文名。
+
+    不改信息内容，只做组织还原：
+      【资本动态】(3条)
+        01 巨潮资讯网 标题
+           · 摘要...
+    """
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for it in items:
+        cat = (it.get("category") or "").strip()
+        if cat not in CATEGORY_ORDER:
+            cat = FALLBACK_CATEGORY
+        grouped.setdefault(cat, []).append(it)
+
+    lines: List[str] = []
+    for cat in CATEGORY_ORDER + [FALLBACK_CATEGORY]:
+        group = grouped.get(cat, [])
+        if not group:
+            continue
+        # 组内排序：可信度优先级升序，同级别按发布时间倒序（无有效时间放末尾）
+        group = sorted(
+            group,
+            key=lambda it: (
+                CREDIBILITY_ORDER.get((it.get("credibility_tag") or "").strip(), 99),
+                -(_parse_publish_ts(it.get("publish_time")) or 0),
+            ),
+        )
+        lines.append(f"【{cat}】({len(group)}条)")
+        for idx, it in enumerate(group, 1):
+            source = _source_display_name(it.get("source_code"))
+            title = (it.get("title") or "").strip()
+            lines.append(f"  {idx:02d} {source} {title}")
+            summary = (it.get("summary") or "").strip()
+            if summary:
+                lines.append(f"    · {summary}")
+    return "\n".join(lines) or "(无内容)"
+
+
 def build_record(latest: Dict[str, Any], attachment_files: List[Path]) -> Dict[str, Any]:
     """
     构建"一天一行"记录（列名以建表时的字段名为准，见 BITABLE.field_map）。
@@ -338,13 +413,8 @@ def build_record(latest: Dict[str, Any], attachment_files: List[Path]) -> Dict[s
     """
     field_map = BITABLE.get("field_map", {})
 
-    # 简报内容：逐条 title + summary 拼接（latest.json 无简报全文，此为结构化摘要）
-    lines = []
-    for it in latest.get("items", []):
-        title = it.get("title", "")
-        summary = (it.get("summary") or "").strip()
-        lines.append(f"- {title}" + (f"\n  {summary}" if summary else ""))
-    briefing = "\n".join(lines) or "(无内容)"
+    # 简报内容（L1 清洗）：按分类分组 + 组内可信度/时间排序 + 编号 + 来源中文名
+    briefing = _build_cleaned_briefing(latest.get("items") or [])
 
     # 源状态：人类可读 + 机器可读并存（各源 status/count/duration_s/error）
     sources = latest.get("sources", {})
@@ -396,7 +466,7 @@ def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = No
               f"{', '.join(f.name for f in files) or '(无)'}")
         print(f"[dry-run] 源状态:\n{record.get('源状态')}")
         print(f"[dry-run] 统计: {record.get('统计')}")
-        print(f"[dry-run] 简报内容:\n{record.get('简报内容')[:600]}")
+        print(f"[dry-run] 简报内容:\n{record.get('简报内容')}")
         return 0
 
     if not cfg.get("enabled"):
