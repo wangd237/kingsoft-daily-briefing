@@ -105,14 +105,11 @@ COLLECTORS = {
         'enable_summary': False,
     },
     'xiaoyou': {
-        'enabled': False,
+        'enabled': True,
         'name': '西山居游戏',
-        'games': [
-            {'id': 'jx3', 'name': '剑网3'},
-            {'id': 'cbjq', 'name': '尘白禁区'},
-        ],
         'credibility': '【官方资讯】',
-        'enable_summary': False,
+        'enable_summary': True,
+        'hours_window': 24,
     },
     'stcn': {
         'enabled': True,
