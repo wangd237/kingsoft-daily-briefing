@@ -39,14 +39,14 @@ COLLECTORS = {
         'org_id': '9900035303',
         'credibility': '【官方公告】',
         'enable_summary': True,  
-        'hours_window': 24,  # 时间窗口：24小时
+        'hours_window': 100,  # 时间窗口：24小时
     },
     'hkex': {
         'enabled': True,
         'name': '港交所披露易',
         'credibility': '【官方公告】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
         'stocks': [
             {'code': '03888', 'name': '金山软件'},
             {'code': '03896', 'name': '金山云'},
@@ -57,14 +57,14 @@ COLLECTORS = {
         'name': '金山软件IR官网',
         'credibility': '【官方公告】',
         'enable_summary': True,
-        'hours_window': 24,  # IR官网公告需要更长时间窗口
+        'hours_window': 100,  # IR官网公告需要更长时间窗口
     },
     'kingsoft_office_ir': {
         'enabled': True,
         'name': '金山办公IR官网',
         'credibility': '【官方公告】',
         'enable_summary': True,
-        'hours_window': 24,  # 时间窗口：24小时
+        'hours_window': 100,  # 时间窗口：24小时
     },
     'wechat': {
         'enabled': False,  # 待实现
@@ -84,7 +84,7 @@ COLLECTORS = {
         'name': '微博',
         'credibility': '【官方资讯】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
         'accounts': [
             # 官方账号
             {'uid': '1298306070', 'name': '金山软件', 'type': '官方'},
@@ -105,7 +105,7 @@ COLLECTORS = {
         'enable_summary': False,
     },
     'xiaoyou': {
-        'enabled': True,
+        'enabled': False,
         'name': '西山居游戏',
         'credibility': '【官方资讯】',
         'enable_summary': True,
@@ -117,7 +117,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,  # 时间窗口：24小时
+        'hours_window': 100,  # 时间窗口：24小时
     },
     'kr36': {
         'enabled': True,
@@ -125,7 +125,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,  # 时间窗口：24小时
+        'hours_window': 100,  # 时间窗口：24小时
     },
     'yicai': {
         'enabled': True,
@@ -133,7 +133,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
     },
     'cls': {
         'enabled': True,
@@ -141,7 +141,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
     },
     'huxiu': {
         'enabled': True,
@@ -149,7 +149,7 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
     },
     'eastmoney': {
         'enabled': True,
@@ -157,10 +157,10 @@ COLLECTORS = {
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
     },
     'xueqiu': {
-        'enabled': True,
+        'enabled': False,  # 雪球需要授权，默认禁用
         'name': '雪球',
         'keywords': ['金山软件', '金山办公', '金山云', '西山居', 'WPS'],
         'credibility': '【媒体报道】',
@@ -181,14 +181,14 @@ COLLECTORS = {
         'keywords': ['金山', 'WPS'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
     },
     'gamelook': {
         'enabled': True,
         'name': 'GameLook',
         'keywords': ['金山', '西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
         'credibility': '【媒体报道】',
-        'hours_window': 24,
+        'hours_window': 100,
         'enable_summary': True,
     },
     'gamersky': {
@@ -197,7 +197,7 @@ COLLECTORS = {
         'keywords': ['西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
     },
     'ali213': {
         'enabled': True,
@@ -205,7 +205,7 @@ COLLECTORS = {
         'keywords': ['西山居', '金山世游', '剑网3', '尘白禁区', '解限机', '鹅鸭杀'],
         'credibility': '【媒体报道】',
         'enable_summary': True,
-        'hours_window': 24,
+        'hours_window': 100,
     },
 }
 
@@ -238,7 +238,7 @@ CATEGORIES = {
 
 # 时间过滤配置
 TIME_FILTER = {
-    'default_hours': 24,  # 汇总层统一 24h 兜底（方案书 5.2 决策点 #2，由 48 改为 24）
+    'default_hours': 100,  # 汇总层统一 24h 兜底（方案书 5.2 决策点 #2，由 48 改为 24）
     'briefing_time': '09:30',
 }
 
@@ -262,20 +262,24 @@ BITABLE = {
     # OAuth 用户授权：dbsheet 是用户级接口，必须用用户 access_token（不能用应用 token）
     # 首次运行 scripts/wps_authorize.py 换取并持久化到 token_file，之后自动刷新
     'authorize_url': 'https://openapi.wps.cn/oauth2/auth',
-    'scope': 'kso.dbsheet.readwrite,kso.dbsheet.read',
+    # kso.drive.readwrite：获取云盘列表；kso.file.readwrite：云文档三步上传（附件写入）
+    'scope': 'kso.dbsheet.readwrite,kso.dbsheet.read,kso.drive.readwrite,kso.file.readwrite',
     'redirect_uri': os.environ.get('WPS_REDIRECT_URI', 'http://127.0.0.1:8765/callback'),
     'token_file': OUTPUT_DIR / 'wps_token.json',
-    # 附件方案 A：当天全部 PDF 挂到一个"附件"字段
+    # 附件字段名（需为"图片和附件"类型，支持多文件）
     'attach_field': '附件',
+    # 表格自动"日期"字段名（upsert 查重用：信息源 + 创建时间落在今天；
+    # 当前表格字段名是"日期"，类型 Date，default_value_type=RecordCreateTime）
+    'created_at_field': '日期',
     # 列名 -> 含义（建表时字段名需与此一致；如有改动只改这里）
+    # 每个采集器一行：序号/日期 由表格字段类型（自动编号/创建时间）自动生成，不写入
     'field_map': {
-        'date': '日期',
-        'briefing': '简报内容',
+        'source': '信息源',
+        'summary': '总结',
         'attachments': '附件',
-        'sources_status': '源状态',
-        'stats': '统计',
-        'run_id': '运行id',
-        'generated_at': '采集时间',
+        'links': '原始链接',
+        'category': '分类',
+        'credibility': '可信度',
     },
 }
 
