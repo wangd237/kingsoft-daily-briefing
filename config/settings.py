@@ -121,19 +121,19 @@ COLLECTORS = {
             },
         ],
     },
-    'media': {
-        'enabled': False,
-        'name': '财经媒体',
-        'sources': ['cls', '36kr', 'huxiu'],
-        'credibility': '【媒体报道】',
-        'enable_summary': False,
-    },
     'xiaoyou': {
         'enabled': True,
         'name': '西山居游戏',
         'credibility': '【官方资讯】',
         'enable_summary': True,
         'hours_window': 24,
+    },
+    'kingsoft_cloud': {
+        'enabled': True,
+        'name': '金山云官网',
+        'credibility': '【官方资讯】',
+        'enable_summary': True,
+        'hours_window': 1000,
     },
     'stcn': {
         'enabled': True,
