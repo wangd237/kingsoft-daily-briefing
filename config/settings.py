@@ -266,8 +266,12 @@ BITABLE = {
     'scope': 'kso.dbsheet.readwrite,kso.dbsheet.read,kso.drive.readwrite,kso.file.readwrite',
     'redirect_uri': os.environ.get('WPS_REDIRECT_URI', 'http://127.0.0.1:8765/callback'),
     'token_file': OUTPUT_DIR / 'wps_token.json',
-    # 附件字段名（需为"图片和附件"类型，支持多文件）
+    # 附件字段名（原"图片和附件"类型。注：开放平台服务端无素材库上传接口，
+    # 附件字段无法程序化写入，见 docs/wps_bitable_attachment_upload_journey.md；
+    # 方案 A：改上传云文档取链接，写入下方"附件链接"字段）
     'attach_field': '附件',
+    # 附件链接字段名（表格里需建"文本"类型列，支持一行一个链接）
+    'attach_url_field': '附件链接',
     # 表格自动"日期"字段名（upsert 查重用：信息源 + 创建时间落在今天；
     # 当前表格字段名是"日期"，类型 Date，default_value_type=RecordCreateTime）
     'created_at_field': '日期',
@@ -277,6 +281,7 @@ BITABLE = {
         'source': '信息源',
         'summary': '总结',
         'attachments': '附件',
+        'attachment_url': '附件链接',
         'links': '原始链接',
         'category': '分类',
         'credibility': '可信度',

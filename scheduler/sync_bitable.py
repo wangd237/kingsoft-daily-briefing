@@ -4,10 +4,12 @@ WPS 多维表格同步（sync_bitable）— 模块 F（M2 对接）
 
 独立对接层，只消费 output/latest.json（附件通过 item.pdf_path / content_ref 定位）：
 - 每个采集器一行：有信息才建/更新行，无信息不动（历史行保留）
-- 每行字段：信息源 | 总结 | 附件 | 原始链接 | 分类 | 可信度
+- 每行字段：信息源 | 总结 | 附件链接 | 原始链接 | 分类 | 可信度
 - 序号、日期由表格字段类型自动生成（自动编号 / 创建时间），本模块不写入
 - upsert 查重键：信息源 + 创建时间落在今天 → update，否则 create
-- 附件双机制：有 PDF 直传 PDF；无 PDF 读正文（content_ref）转 txt 上传
+- 附件（方案 A）：开放平台服务端无素材库上传接口，"附件"字段无法程序化写入；
+  改为云文档三步上传（OAuth 可用的唯一上传通道）拿到 link_url，写入"附件链接"字段。
+  有 PDF 传 PDF；无 PDF 读正文（content_ref）转 txt 上传。
 - 同步失败不影响本地产物（try/except 兜底）
 
 前置依赖（在 open.wps.cn 创建企业应用 + 授权目标表格后，填入 .env）：
@@ -28,12 +30,10 @@ WPS 多维表格同步（sync_bitable）— 模块 F（M2 对接）
 - WPS 开放 API 的具体路径/参数以 open.wps.cn 官方文档（API 调试台）为准；
   本模块将接口常量集中定义（BASE_URL / API 路径），联调时如有出入只改常量。
 """
-import base64
 import hashlib
 import hmac
 import json
 import logging
-import mimetypes
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -56,17 +56,20 @@ from config.settings import (
 # 用户级 access_token 有效期约 2 小时，留 10 分钟余量提前刷新
 TOKEN_TTL_SECONDS = 2 * 3600 - 600
 
-# base64 直写单文件上限（保守取值：官方单文件 20MB 限制通常指 base64 串长度，
-# base64 膨胀约 1/3，故原始文件保守按 15MB 走直写，超出走"获取上传附件/图片 URL"流程）
-MAX_BASE64_BYTES = 15 * 1024 * 1024
-
-# 附件方案 A：全部 PDF 挂到该字段（需为"图片和附件"类型）
+# 附件方案 A：不再写"附件"字段（服务端无素材库上传接口），改上传云文档取 link_url
+# 写入"附件链接"字段（表格需建"文本"类型列，一行一个链接）
 ATTACH_FIELD = "附件"
+ATTACH_URL_FIELD = "附件链接"
 
 # 记录接口路径（以官方文档为准，联调如有出入只改这里）
 API_RECORDS_GET = "/v7/coop/dbsheet/{file_id}/sheets/{sheet_id}/records"
 API_RECORDS_CREATE = "/v7/coop/dbsheet/{file_id}/sheets/{sheet_id}/records/create"
 API_RECORDS_UPDATE = "/v7/coop/dbsheet/{file_id}/sheets/{sheet_id}/records/update"
+
+# 云文档三步上传（服务端唯一可用的上传通道，产出 link_url；drive_id/parent_id 为路径参数）
+API_DRIVES = "/v7/drives"
+API_DRIVE_UPLOAD_REQUEST = "/v7/drives/{drive_id}/files/{parent_id}/request_upload"
+API_DRIVE_UPLOAD_COMMIT = "/v7/drives/{drive_id}/files/{parent_id}/commit_upload"
 
 
 class BitableSyncError(Exception):
@@ -97,6 +100,7 @@ class BitableClient:
         self.logger = logger or logging.getLogger("sync_bitable")
         self._token: Optional[str] = None
         self._token_ts: float = 0.0
+        self._drive_id: Optional[str] = None
 
     # ---------------- token ----------------
     # 说明：dbsheet 是"用户级"数据接口，必须用用户 access_token（OAuth 授权码模式），
@@ -201,7 +205,9 @@ class BitableClient:
         """带签名与 token 的请求。path 为相对路径（不含 host），body 按 JSON 编码。"""
         if body is None:
             body = {}
-        body_str = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        # GET 请求无请求体，签名与发送都按空 body 处理（KSO-1 签名串与之一致）
+        is_get = method.upper() == "GET"
+        body_str = "" if is_get else json.dumps(body, ensure_ascii=False, separators=(",", ":"))
         content_type = "application/json"
         # Kso-Date 格式（GMT RFC1123，以官方为准）
         kso_date = format_datetime(datetime.now(timezone.utc), usegmt=True)
@@ -215,10 +221,13 @@ class BitableClient:
             "Authorization": f"Bearer {token}",
             "X-Kso-Date": kso_date,
             "X-Kso-Authorization": f"KSO-1 {self.app_id}:{signature}",
+            "X-Kso-Id-Type": "internal",
             "Content-Type": content_type,
         }
+        # GET 不带请求体（部分接口如 /v7/drives 拒绝空 body）
+        send_data = None if is_get else body_str
         resp = requests.request(
-            method, f"{self.base_url}{uri}", headers=headers, data=body_str, timeout=60
+            method, f"{self.base_url}{uri}", headers=headers, data=send_data, timeout=60
         )
         if resp.status_code != 200:
             raise BitableSyncError(
@@ -285,42 +294,76 @@ class BitableClient:
             },
         )
 
-    # ---------------- 附件 ----------------
+    # ---------------- 附件上传（方案 A：云文档三步上传取链接） ----------------
 
-    @staticmethod
-    def _data_to_base64_value(file_name: str, data: bytes, mime: str) -> dict:
-        """内存数据附件：base64 Data URL 直写（官方上限单文件 20MB）"""
-        b64 = base64.b64encode(data).decode("ascii")
-        return {"fileData": f"data:{mime};base64,{b64}", "fileName": file_name}
+    def _get_drive_id(self) -> str:
+        """获取默认云盘 drive_id（内存缓存，避免每次上传都拉一次盘列表）。
+        注意：接口要求 allotee_type=user&page_size=100，缺参返回 400。"""
+        if self._drive_id:
+            return self._drive_id
+        data = self._request("GET", API_DRIVES + "?allotee_type=user&page_size=100")
+        items = (data.get("data") or {}).get("items") or []
+        if not items:
+            raise BitableSyncError("云盘列表为空，无法上传附件")
+        self._drive_id = items[0].get("id") or items[0].get("drive_id")
+        if not self._drive_id:
+            raise BitableSyncError(f"云盘列表缺少 drive_id: {items[:1]}")
+        return self._drive_id
 
-    @staticmethod
-    def _file_to_base64_value(pdf_path: Path) -> dict:
-        """小文件附件：base64 Data URL 直写（官方上限单文件 20MB）"""
-        mime = mimetypes.guess_type(pdf_path.name)[0] or "application/pdf"
-        return BitableClient._data_to_base64_value(
-            pdf_path.name, pdf_path.read_bytes(), mime
-        )
-
-    def _upload_large_file(self, pdf_path: Path) -> dict:
+    def upload_to_drive(self, file_name: str, content: bytes) -> str:
         """
-        大文件附件：走"获取上传附件/图片 URL"流程（上传到素材库后拿 fileToken）。
-        具体端点与参数需在 open.wps.cn API 调试台确认后填入；未配置时明确报错，
-        避免静默丢失附件。
+        云文档三步上传（OAuth 可用）：request_upload → PUT 实体 → commit_upload。
+        返回可访问链接 link_url（如 https://www.kdocs.cn/l/xxxx）。
         """
-        raise BitableSyncError(
-            f"{pdf_path.name} 超过 base64 直写上限，需配置大文件上传流程"
-            "（open.wps.cn API 调试台 → 获取上传附件/图片 URL），联调后补全"
+        drive_id = self._get_drive_id()
+        parent_id = "0"  # 根目录（如需归档可改为云盘内文件夹 id）
+        uri_request = API_DRIVE_UPLOAD_REQUEST.format(
+            drive_id=drive_id, parent_id=parent_id
         )
-
-    def build_attachment_value(self, pdf_paths: List[Path]) -> List[dict]:
-        """附件方案 A：当天全部 PDF 组装成一个附件字段的值"""
-        values: List[dict] = []
-        for pdf in pdf_paths:
-            if pdf.stat().st_size > MAX_BASE64_BYTES:
-                values.append(self._upload_large_file(pdf))
-            else:
-                values.append(self._file_to_base64_value(pdf))
-        return values
+        body = {
+            "name": file_name,
+            "size": len(content),
+            "hashes": [{"sum": hashlib.md5(content).hexdigest(), "type": "md5"}],
+            "on_name_conflict": "rename",
+        }
+        # C1: 请求上传信息（拿对象存储地址与 upload_id）
+        data1 = self._request("POST", uri_request, body)
+        d1 = data1.get("data") or {}
+        upload_id = d1.get("upload_id")
+        store = d1.get("store_request") or {}
+        if not upload_id or not store.get("url"):
+            raise BitableSyncError(f"request_upload 响应缺少 upload_id/store: {data1}")
+        # C2: 上传实体到对象存储（需透传与申请接口相同的 KSO-1 鉴权头，实测必需）
+        body_str = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        kso_date = format_datetime(datetime.now(timezone.utc), usegmt=True)
+        token = self._get_token()
+        signature = self._sign(
+            self.app_key, "POST", uri_request, "application/json", body_str, kso_date
+        )
+        headers2 = {
+            "Authorization": f"Bearer {token}",
+            "X-Kso-Date": kso_date,
+            "X-Kso-Authorization": f"KSO-1 {self.app_id}:{signature}",
+            "X-Kso-Id-Type": "internal",
+        }
+        resp2 = requests.request(
+            store.get("method", "PUT"), store["url"], data=content,
+            headers=headers2, timeout=180,
+        )
+        if resp2.status_code >= 300:
+            raise BitableSyncError(
+                f"{file_name} 上传实体失败: HTTP {resp2.status_code} {resp2.text[:200]}"
+            )
+        # C3: 提交上传完成（拿 link_url）
+        uri_commit = API_DRIVE_UPLOAD_COMMIT.format(
+            drive_id=drive_id, parent_id=parent_id
+        )
+        data3 = self._request("POST", uri_commit, {"upload_id": upload_id})
+        link_url = (data3.get("data") or {}).get("link_url")
+        if not link_url:
+            raise BitableSyncError(f"commit_upload 响应缺少 link_url: {data3}")
+        self.logger.info(f"[附件] 已上传云文档: {file_name} -> {link_url}")
+        return link_url
 
 
 # ---------------------------------------------------------------- 数据组装
@@ -428,30 +471,29 @@ def _collect_source_attachments(
     return pdfs, txts
 
 
-def _assemble_attachments(
-    pdfs: List[Path], txts: List[Tuple[str, str]]
-) -> List[dict]:
-    """把 PDF + 正文 txt 组装成附件字段 API 值（均 base64 直写；超大 PDF 明确报错）"""
-    values: List[dict] = []
+def _upload_attachments(
+    client: BitableClient, pdfs: List[Path], txts: List[Tuple[str, str]]
+) -> List[str]:
+    """把 PDF + 正文 txt 逐个上传云文档，返回 link_url 列表。
+    单个文件失败仅记日志并跳过（附件是增强信息，不阻断整行同步）。"""
+    links: List[str] = []
     for pdf in pdfs:
-        if pdf.stat().st_size > MAX_BASE64_BYTES:
-            raise BitableSyncError(
-                f"{pdf.name} 超过 base64 直写上限，需配置大文件上传流程"
-                "（open.wps.cn API 调试台 → 获取上传附件/图片 URL），联调后补全"
-            )
-        values.append(BitableClient._file_to_base64_value(pdf))
+        try:
+            links.append(client.upload_to_drive(pdf.name, pdf.read_bytes()))
+        except BitableSyncError as e:
+            client.logger.error(f"[附件] 上传失败 {pdf.name}: {e}")
     for name, text in txts:
-        values.append(
-            BitableClient._data_to_base64_value(
-                name, text.encode("utf-8"), "text/plain"
-            )
-        )
-    return values
+        try:
+            links.append(client.upload_to_drive(name, text.encode("utf-8")))
+        except BitableSyncError as e:
+            client.logger.error(f"[附件] 上传失败 {name}: {e}")
+    return links
 
 
 def _build_source_record(source_code: str, group: List[Dict[str, Any]]) -> Dict[str, Any]:
     """按源组装一条记录（列名以 BITABLE.field_map 为准）。
-    附件列为内部结构 {pdfs, txts}，同步前由 _assemble_attachments 替换为 API 值。"""
+    附件列为内部结构 {pdfs, txts}：dry-run 仅展示；同步时由 _upload_attachments
+    上传云文档取链接，写入"附件链接"字段。"""
     field_map = BITABLE.get("field_map", {})
     # 表格 SingleSelect 选项是"官方公告/官方资讯/媒体报道"，配置值带【】装饰需剥掉
     credibility = (
@@ -482,13 +524,25 @@ def build_records(latest: Dict[str, Any]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------- 查重辅助
 
 def _parse_created_ts(value) -> Optional[float]:
-    """解析表格"创建时间"字段值为 epoch 秒（兼容毫秒/秒时间戳、ISO 字符串）"""
+    """解析表格"创建时间"字段值为 epoch 秒（兼容毫秒/秒时间戳、ISO 字符串、斜杠日期）。
+    注意：表格日期字段实际返回"2026/08/20 10:58:05"斜杠格式，ISO 解析会失败导致查重失效。"""
     if value is None:
         return None
     if isinstance(value, (int, float)):
         return value / 1000.0 if value > 1e11 else value
+    s = str(value).strip()
+    if not s:
+        return None
+    # 斜杠格式：2026/08/20 10:58:05
+    if "/" in s:
+        for fmt in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(s, fmt).timestamp()
+            except ValueError:
+                continue
+        return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
 
@@ -519,6 +573,7 @@ def _print_dry_run(record: Dict[str, Any], attach_field: str) -> None:
     txt_desc = ", ".join(f"{n}({len(t)}字)" for n, t in txts) or "(无)"
     print(f"[附件] PDF: {pdf_desc}")
     print(f"       正文txt: {txt_desc}")
+    print("       (同步时将上传云文档取链接，写入「附件链接」字段)")
 
 
 def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = None) -> int:
@@ -531,6 +586,7 @@ def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = No
     cfg = BITABLE
     field_map = cfg.get("field_map", {})
     attach_field = field_map.get("attachments", ATTACH_FIELD)
+    url_field = field_map.get("attachment_url", ATTACH_URL_FIELD)
     source_field = field_map.get("source", "信息源")
     created_field = cfg.get("created_at_field", "创建时间")
 
@@ -577,12 +633,19 @@ def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = No
             )
             for r in recs:
                 rid = r.get("record_id") or r.get("id")
-                ts = _parse_created_ts((r.get("fields") or {}).get(created_field))
+                raw_fields = r.get("fields") or "{}"
+                try:
+                    r_fields = (
+                        json.loads(raw_fields) if isinstance(raw_fields, str) else raw_fields
+                    )
+                except json.JSONDecodeError:
+                    continue
+                ts = _parse_created_ts(r_fields.get(created_field))
                 if ts is not None and _is_today_local(ts):
                     existing[src] = rid
                     break
 
-        # 2. 逐源 upsert（空值字段不写入；附件组装为 API 值）
+        # 2. 逐源 upsert（空值字段不写入；附件上传云文档取链接写"附件链接"字段）
         for rec in records:
             src = rec.get(source_field, "")
             if not src:
@@ -590,9 +653,11 @@ def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = No
             fields = {k: v for k, v in rec.items() if v not in ("", [], None)}
             attach_info = fields.pop(attach_field, None) or {}
             if attach_info.get("pdfs") or attach_info.get("txts"):
-                fields[attach_field] = _assemble_attachments(
-                    attach_info.get("pdfs", []), attach_info.get("txts", [])
+                links = _upload_attachments(
+                    client, attach_info.get("pdfs", []), attach_info.get("txts", [])
                 )
+                if links:
+                    fields[url_field] = "\n".join(links)
             if src in existing:
                 client.update_record(existing[src], fields)
                 logger.info(f"[同步] 已更新: {src} (record_id={existing[src]})")
