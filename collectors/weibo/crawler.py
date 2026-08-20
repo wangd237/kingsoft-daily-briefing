@@ -259,6 +259,7 @@ class WeiboCrawler(BaseCrawler):
         import re
 
         text = (summary or "").strip()
+        text = text[:800]  # 标题生成输入兜底截断
         if not text:
             return ""
 
@@ -268,7 +269,7 @@ class WeiboCrawler(BaseCrawler):
         prompt = f"""请根据以下微博摘要生成一个中文日报标题。
         
     要求：
-    1. 只输出标题正文，不要解释，不要空行。
+    1. 只输出标题正文；禁止出现任何解释/前缀；禁止换行（必须为单行）。
     2. 标题控制在 12—40 个汉字以内。
     3. 不要出现微博账号名或 @用户名；人物名仅在无法准确概括事件时保留。
     4. 不要添加“标题：”“AI微博标题：”等前缀。
@@ -278,6 +279,44 @@ class WeiboCrawler(BaseCrawler):
     微博摘要：
     {summary}
     """
+        def _clean_and_validate_title(candidate: str) -> str:
+            if not candidate:
+                return ""
+            title = str(candidate).strip().replace("\n", " ")
+
+            if not re.search(r"[\u4e00-\u9fff]", title):
+                return ""
+                
+            title = re.sub(
+                r"^(AI\s*微博标题|微博标题|日报标题|标题|Title)\s*[:：]\s*",
+                "",
+                title,
+                flags=re.I,
+            )
+            title = re.sub(r"^\[[^\]]{1,20}\]\s*", "", title)
+            title = re.sub(r"^@\S+\s*[｜|:：\-]*\s*", "", title)
+            title = title.strip("\"'“”‘’").strip()
+            title = re.sub(r"\s+", " ", title)
+            title = title.strip(" 　-—|·，,。！!：:；;")
+            if len(title) < 4 or len(title) > 40:
+                return ""
+            return title
+            
+        def _fallback_extract_title_from_text(t: str) -> str:
+            """在截断/字段为空时，从其它文本里尽力捞取一个标题候选。"""
+            if not t:
+                return ""
+                
+            # 1) 先尝试抓 TITLE:xxx 或 标题：xxx
+            m = re.search(r"(?:^|\n)\s*(?:TITLE|title|标题)\s*[:：]\s*(.+)", t)
+            if m:
+                return _clean_and_validate_title(m.group(1))
+                
+            # 2) 再尝试取第一行作为候选（通常单行标题会落在第一行）
+            first_line = t.strip().splitlines()[0].strip() if t.strip() else ""
+            if first_line:
+                first_line = first_line[:100]
+            return _clean_and_validate_title(first_line)
 
         try:
             response = self.summarizer.client.chat.completions.create(
@@ -294,39 +333,27 @@ class WeiboCrawler(BaseCrawler):
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.3,
-                max_tokens=1200,
+                max_tokens=5000,
                 timeout=30,
             )
+            
             choice = response.choices[0]
             message = choice.message
+            
             raw = (getattr(message, "content", None) or "").strip()
             
             if not raw:
-                reasoning = (getattr(message, "reasoning_content", None) or "").strip()
                 self.logger.warning(
                     f"AI 标题无正文：finish_reason={getattr(choice, 'finish_reason', None)!r}，"
-                    f"模型={self.summarizer.model}，"
-                    f"推理内容长度={len(reasoning)}"
+                    f"禁止从其它字段兜底提取；返回空以启用规则标题。"
                 )
                 return ""
-
-            title = str(raw or "").strip().replace("\n", " ")
-            title = re.sub(
-            r"^(AI\s*微博标题|微博标题|日报标题|标题|Title)\s*[:：]\s*",
-            "",
-            title,
-            flags=re.I,
-        )
-            title = re.sub(r"^\[[^\]]{1,20}\]\s*", "", title)
-            title = re.sub(r"^@\S+\s*[｜|:：\-]*\s*", "", title)
-            title = title.strip("\"'“”‘’").strip()
-            title = re.sub(r"\s+", " ", title)
-            title = title.strip(" 　-—|·，,。！!：:；;")
-            
-            if len(title) < 4 or len(title) > 40:
-                self.logger.warning(f"AI 标题长度不合格，沿用规则标题: {title!r}")
-                return ""
-           
+                
+            title = _clean_and_validate_title(raw)
+            if not title:
+                self.logger.warning(f"AI 标题长度不合格，沿用规则标题: {raw!r}")
+                return ""           
+                
             self.logger.info(f"AI 微博最终标题: {title!r}，长度: {len(title)}")
             return title
 
@@ -521,7 +548,7 @@ class WeiboCrawler(BaseCrawler):
 
 def main():
     """运行微博采集器。"""
-    hours_window = int(os.getenv("WEIBO_HOURS_WINDOW", "72"))
+    hours_window = int(os.getenv("WEIBO_HOURS_WINDOW", "720"))
 
     crawler = WeiboCrawler(hours_window=hours_window)
     items = crawler.run()
