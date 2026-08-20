@@ -2,10 +2,12 @@
 """
 WPS 多维表格同步（sync_bitable）— 模块 F（M2 对接）
 
-总调度器与汇总实施方案.md 模块 M2：
-- 独立对接层，只消费 output/latest.json + output/latest_attachments/
-- 一天一行 upsert：日期(主键) | 简报内容 | 附件 | 源状态 | 统计 | 采集时间
-- 附件方案 A：当天全部 PDF 挂到一个"附件"字段（命名沿用 {source_code}_{原文件名}）
+独立对接层，只消费 output/latest.json（附件通过 item.pdf_path / content_ref 定位）：
+- 每个采集器一行：有信息才建/更新行，无信息不动（历史行保留）
+- 每行字段：信息源 | 总结 | 附件 | 原始链接 | 分类 | 可信度
+- 序号、日期由表格字段类型自动生成（自动编号 / 创建时间），本模块不写入
+- upsert 查重键：信息源 + 创建时间落在今天 → update，否则 create
+- 附件双机制：有 PDF 直传 PDF；无 PDF 读正文（content_ref）转 txt 上传
 - 同步失败不影响本地产物（try/except 兜底）
 
 前置依赖（在 open.wps.cn 创建企业应用 + 授权目标表格后，填入 .env）：
@@ -33,6 +35,7 @@ import json
 import logging
 import mimetypes
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
@@ -44,8 +47,8 @@ from config.settings import (
     BITABLE,
     CATEGORIES,
     COLLECTORS,
-    LATEST_ATTACHMENTS_DIR,
     LATEST_JSON,
+    OUTPUT_DIR,
 )
 
 # ---------------------------------------------------------------- 常量
@@ -225,25 +228,30 @@ class BitableClient:
 
     # ---------------- 记录 CRUD ----------------
 
-    def list_records(self, date: Optional[str] = None) -> List[dict]:
-        """查记录。date 非空时仅返回该日期的记录（upsert 主键）。"""
-        # 官方列举记录请求体：游标分页 page_size + page_token（首页不传/传空），filter 用 mode/criteria 结构
-        body: Dict[str, Any] = {
-            "prefer_id": False,
-            "page_size": 100,
-            "page_token": "",
-            "fields": [],
-            "filter": None,
-        }
-        if date:
-            body["filter"] = {
-                "mode": "AND",
-                "criteria": [{"field": "日期", "operator": "Equals", "values": [date]}],
+    def list_records(self, criteria: Optional[List[dict]] = None) -> List[dict]:
+        """
+        查记录。criteria 非空时按字段过滤（[{field, operator, values}]）。
+        游标分页拉全量（page_token 为空即末页；若响应无 page_token 则只拉一页）。
+        """
+        records: List[dict] = []
+        page_token = ""
+        for _ in range(100):  # 兜底防死循环（100 页 = 1 万条/源，远超单源每日 1 行的量级）
+            body: Dict[str, Any] = {
+                "prefer_id": False,
+                "page_size": 100,
+                "page_token": page_token,
+                "fields": [],
+                "filter": None,
             }
-        data = self._request("POST", API_RECORDS_GET, body)
-        # 响应结构以官方为准：常见形态 data.records[]（含 record_id 与 fields）
-        records = data.get("data", {}).get("records", [])
-        return records or []
+            if criteria:
+                body["filter"] = {"mode": "AND", "criteria": criteria}
+            data = self._request("POST", API_RECORDS_GET, body)
+            page = data.get("data", {}).get("records") or []
+            records.extend(page)
+            page_token = data.get("data", {}).get("page_token") or ""
+            if not page_token:
+                break
+        return records
 
     def create_record(self, fields: Dict[str, Any]) -> str:
         """创建记录，返回 record_id"""
@@ -277,14 +285,21 @@ class BitableClient:
             },
         )
 
-    # ---------------- 附件（方案 A） ----------------
+    # ---------------- 附件 ----------------
+
+    @staticmethod
+    def _data_to_base64_value(file_name: str, data: bytes, mime: str) -> dict:
+        """内存数据附件：base64 Data URL 直写（官方上限单文件 20MB）"""
+        b64 = base64.b64encode(data).decode("ascii")
+        return {"fileData": f"data:{mime};base64,{b64}", "fileName": file_name}
 
     @staticmethod
     def _file_to_base64_value(pdf_path: Path) -> dict:
         """小文件附件：base64 Data URL 直写（官方上限单文件 20MB）"""
         mime = mimetypes.guess_type(pdf_path.name)[0] or "application/pdf"
-        b64 = base64.b64encode(pdf_path.read_bytes()).decode("ascii")
-        return {"fileData": f"data:{mime};base64,{b64}", "fileName": pdf_path.name}
+        return BitableClient._data_to_base64_value(
+            pdf_path.name, pdf_path.read_bytes(), mime
+        )
 
     def _upload_large_file(self, pdf_path: Path) -> dict:
         """
@@ -310,42 +325,15 @@ class BitableClient:
 
 # ---------------------------------------------------------------- 数据组装
 
-def load_latest() -> Tuple[Dict[str, Any], List[Path]]:
-    """
-    读取主产物：latest.json + 归集附件目录。
-    返回 (latest_dict, attachment_files)；主产物缺失时抛 BitableSyncError。
-    """
+# 正文转 txt 单文件字符上限（base64 膨胀约 1/3，20KB 文本 ≈ 27KB base64，远低于直写阈值）
+MAX_CONTENT_CHARS = 20000
+
+
+def load_latest() -> Dict[str, Any]:
+    """读取主产物 latest.json；缺失时抛 BitableSyncError。"""
     if not LATEST_JSON.exists():
         raise BitableSyncError(f"主产物缺失: {LATEST_JSON}，请先运行采集+汇总")
-    latest = json.loads(LATEST_JSON.read_text(encoding="utf-8"))
-
-    files: List[Path] = []
-    if LATEST_ATTACHMENTS_DIR.exists():
-        files = sorted(
-            [p for p in LATEST_ATTACHMENTS_DIR.iterdir() if p.suffix.lower() == ".pdf"]
-        )
-    return latest, files
-
-
-def _to_time_value(iso_value: str) -> str:
-    """Time 类型字段只接受 HH:mm:ss；把 ISO 时间戳截取时刻部分（解析失败原样兜底）"""
-    if not iso_value:
-        return ""
-    try:
-        return datetime.fromisoformat(iso_value).strftime("%H:%M:%S")
-    except (TypeError, ValueError):
-        return iso_value
-
-
-# ---------------------------------------------------------------- 简报内容清洗（L1）
-
-# 分类展示顺序（与 config/settings.py CATEGORIES 定义顺序一致）
-CATEGORY_ORDER = list(CATEGORIES.keys())
-# 未命中 5 类的条目归入该兜底分类（客观真实：不丢弃，单独列出）
-FALLBACK_CATEGORY = "其他"
-
-# 可信度优先级：官方公告 > 官方资讯 > 媒体报道（未知兜底排最后）
-CREDIBILITY_ORDER = {"【官方公告】": 0, "【官方资讯】": 1, "【媒体报道】": 2}
+    return json.loads(LATEST_JSON.read_text(encoding="utf-8"))
 
 
 def _source_display_name(source_code: str) -> str:
@@ -366,95 +354,189 @@ def _parse_publish_ts(value) -> Optional[float]:
         return None
 
 
-def _build_cleaned_briefing(items: List[Dict[str, Any]]) -> str:
-    """
-    L1 简报内容清洗：按分类分组 + 组内按可信度/时间排序 + 编号 + 来源中文名。
+def _read_content_text(it: Dict[str, Any]) -> str:
+    """读正文全文（content_ref + batch_dir 定位）；无正文返回空串"""
+    ref = (it.get("content_ref") or "").strip()
+    batch_dir = (it.get("batch_dir") or "").strip()
+    if not ref or not batch_dir:
+        return ""
+    p = Path(batch_dir) / ref
+    if not p.exists():
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        try:
+            text = p.read_text(encoding="gbk", errors="replace")
+        except OSError:
+            return ""
+    return text.strip()[:MAX_CONTENT_CHARS]
 
-    不改信息内容，只做组织还原：
-      【资本动态】(3条)
-        01 巨潮资讯网 标题
-           · 摘要...
-    """
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
-    for it in items:
-        cat = (it.get("category") or "").strip()
-        if cat not in CATEGORY_ORDER:
-            cat = FALLBACK_CATEGORY
-        grouped.setdefault(cat, []).append(it)
 
+def _build_source_summary(group: List[Dict[str, Any]]) -> str:
+    """单源总结：编号 + 标题 + 缩进摘要（按发布时间倒序，无有效时间放末尾）"""
+    group = sorted(
+        group, key=lambda it: -(_parse_publish_ts(it.get("publish_time")) or 0)
+    )
     lines: List[str] = []
-    for cat in CATEGORY_ORDER + [FALLBACK_CATEGORY]:
-        group = grouped.get(cat, [])
-        if not group:
-            continue
-        # 组内排序：可信度优先级升序，同级别按发布时间倒序（无有效时间放末尾）
-        group = sorted(
-            group,
-            key=lambda it: (
-                CREDIBILITY_ORDER.get((it.get("credibility_tag") or "").strip(), 99),
-                -(_parse_publish_ts(it.get("publish_time")) or 0),
-            ),
-        )
-        lines.append(f"【{cat}】({len(group)}条)")
-        for idx, it in enumerate(group, 1):
-            source = _source_display_name(it.get("source_code"))
-            title = (it.get("title") or "").strip()
-            lines.append(f"  {idx:02d} {source} {title}")
-            summary = (it.get("summary") or "").strip()
-            if summary:
-                lines.append(f"    · {summary}")
+    for idx, it in enumerate(group, 1):
+        title = (it.get("title") or "").strip()
+        lines.append(f"{idx:02d} {title}")
+        summary = (it.get("summary") or "").strip()
+        if summary:
+            lines.append(f"   · {summary}")
     return "\n".join(lines) or "(无内容)"
 
 
-def build_record(latest: Dict[str, Any], attachment_files: List[Path]) -> Dict[str, Any]:
-    """
-    构建"一天一行"记录（列名以建表时的字段名为准，见 BITABLE.field_map）。
-    返回 {列名: 值}。
-    """
+def _build_source_links(group: List[Dict[str, Any]]) -> str:
+    """原始链接：该源全部条目 url，每条一行"""
+    return "\n".join(
+        (it.get("url") or "").strip() for it in group if (it.get("url") or "").strip()
+    )
+
+
+def _build_source_categories(group: List[Dict[str, Any]]) -> List[str]:
+    """分类：全部列出，按命中条数降序（条数相同按 settings.CATEGORIES 定义顺序）"""
+    counts = Counter(
+        (it.get("category") or "").strip()
+        for it in group
+        if (it.get("category") or "").strip()
+    )
+    if not counts:
+        return []
+    order = {c: i for i, c in enumerate(CATEGORIES.keys())}
+    return [c for c, _ in sorted(counts.items(), key=lambda kv: (-kv[1], order.get(kv[0], 999)))]
+
+
+def _collect_source_attachments(
+    source_code: str, group: List[Dict[str, Any]]
+) -> Tuple[List[Path], List[Tuple[str, str]]]:
+    """按源收集附件：返回 (pdf文件列表, [(txt文件名, 正文), ...])。
+    条目优先用 PDF（item.pdf_path）；无 PDF 读正文转 txt；两者皆无则跳过。"""
+    pdfs: List[Path] = []
+    txts: List[Tuple[str, str]] = []
+    for idx, it in enumerate(group, 1):
+        pdf_rel = (it.get("pdf_path") or "").strip()
+        if pdf_rel:
+            p = OUTPUT_DIR / pdf_rel
+            if p.exists() and p.suffix.lower() == ".pdf":
+                pdfs.append(p)
+                continue
+        text = _read_content_text(it)
+        if text:
+            txts.append((f"{source_code}_{idx:03d}.txt", text))
+    return pdfs, txts
+
+
+def _assemble_attachments(
+    pdfs: List[Path], txts: List[Tuple[str, str]]
+) -> List[dict]:
+    """把 PDF + 正文 txt 组装成附件字段 API 值（均 base64 直写；超大 PDF 明确报错）"""
+    values: List[dict] = []
+    for pdf in pdfs:
+        if pdf.stat().st_size > MAX_BASE64_BYTES:
+            raise BitableSyncError(
+                f"{pdf.name} 超过 base64 直写上限，需配置大文件上传流程"
+                "（open.wps.cn API 调试台 → 获取上传附件/图片 URL），联调后补全"
+            )
+        values.append(BitableClient._file_to_base64_value(pdf))
+    for name, text in txts:
+        values.append(
+            BitableClient._data_to_base64_value(
+                name, text.encode("utf-8"), "text/plain"
+            )
+        )
+    return values
+
+
+def _build_source_record(source_code: str, group: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """按源组装一条记录（列名以 BITABLE.field_map 为准）。
+    附件列为内部结构 {pdfs, txts}，同步前由 _assemble_attachments 替换为 API 值。"""
     field_map = BITABLE.get("field_map", {})
-
-    # 简报内容（L1 清洗）：按分类分组 + 组内可信度/时间排序 + 编号 + 来源中文名
-    briefing = _build_cleaned_briefing(latest.get("items") or [])
-
-    # 源状态：人类可读 + 机器可读并存（各源 status/count/duration_s/error）
-    sources = latest.get("sources", {})
-    sources_status_lines = []
-    for code, s in sorted(sources.items()):
-        status = s.get("status", "?")
-        count = s.get("count", 0)
-        err = s.get("error") or ""
-        sources_status_lines.append(f"{code}: {status}({count})" + (f" {err}" if err else ""))
-    sources_status = "\n".join(sources_status_lines) or "(无源状态)"
-
-    stats = latest.get("stats", {})
-    stats_text = " | ".join(f"{k}={v}" for k, v in stats.items())
-
+    # 表格 SingleSelect 选项是"官方公告/官方资讯/媒体报道"，配置值带【】装饰需剥掉
+    credibility = (
+        (COLLECTORS.get(source_code) or {}).get("credibility", "").strip("【】")
+    )
+    pdfs, txts = _collect_source_attachments(source_code, group)
     return {
-        field_map.get("date", "日期"): latest.get("date", ""),
-        field_map.get("briefing", "简报内容"): briefing,
-        field_map.get("attachments", ATTACH_FIELD): attachment_files,
-        field_map.get("sources_status", "源状态"): sources_status,
-        field_map.get("stats", "统计"): stats_text,
-        field_map.get("run_id", "运行id"): latest.get("run_id", ""),
-        field_map.get("generated_at", "采集时间"): _to_time_value(
-            str(latest.get("generated_at", ""))
-        ),
+        field_map.get("source", "信息源"): _source_display_name(source_code),
+        field_map.get("summary", "总结"): _build_source_summary(group),
+        field_map.get("attachments", ATTACH_FIELD): {"pdfs": pdfs, "txts": txts},
+        field_map.get("links", "原始链接"): _build_source_links(group),
+        field_map.get("category", "分类"): _build_source_categories(group),
+        field_map.get("credibility", "可信度"): [credibility] if credibility else [],
     }
+
+
+def build_records(latest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """按采集器分组构建"每源一行"记录列表；有信息的源才有记录（无信息源不建行）。"""
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for it in latest.get("items") or []:
+        code = it.get("source_code") or ""
+        if not code:
+            continue
+        grouped.setdefault(code, []).append(it)
+    return [_build_source_record(code, group) for code, group in sorted(grouped.items())]
+
+
+# ---------------------------------------------------------------- 查重辅助
+
+def _parse_created_ts(value) -> Optional[float]:
+    """解析表格"创建时间"字段值为 epoch 秒（兼容毫秒/秒时间戳、ISO 字符串）"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value / 1000.0 if value > 1e11 else value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _is_today_local(ts: float) -> bool:
+    """epoch 秒是否落在本地时区今天"""
+    return datetime.fromtimestamp(ts).date() == datetime.now().date()
 
 
 # ---------------------------------------------------------------- 主入口
 
+def _print_dry_run(record: Dict[str, Any], attach_field: str) -> None:
+    """dry-run：打印一条源记录的可读形态（不含 base64 附件内容）"""
+    source = record.get("信息源", "?")
+    summary = (record.get("总结") or "").splitlines()
+    print(f"\n【{source}】")
+    print("[总结]")
+    for line in summary:
+        print(f"  {line}")
+    attach = record.get(attach_field) or {}
+    pdfs, txts = attach.get("pdfs", []), attach.get("txts", [])
+    print("[原始链接]")
+    for line in (record.get("原始链接") or "").splitlines():
+        print(f"  {line}")
+    print(f"[分类] {'、'.join(record.get('分类') or []) or '(无)'}")
+    print(f"[可信度] {'、'.join(record.get('可信度') or []) or '(无)'}")
+    pdf_desc = ", ".join(p.name for p in pdfs) or "(无)"
+    txt_desc = ", ".join(f"{n}({len(t)}字)" for n, t in txts) or "(无)"
+    print(f"[附件] PDF: {pdf_desc}")
+    print(f"       正文txt: {txt_desc}")
+
+
 def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = None) -> int:
     """
-    M2 对接主入口：latest.json + latest_attachments/ → WPS 多维表格"一天一行"upsert。
+    M2 对接主入口：latest.json → WPS 多维表格"每采集器一行"upsert。
+    查重键：信息源 + 创建时间落在今天（创建时间由表格字段自动生成，本模块不写入）。
     返回：0 成功（含 dry-run）；非 0 失败（仅告警，不影响本地产物）。
     """
     logger = logger or logging.getLogger("sync_bitable")
     cfg = BITABLE
+    field_map = cfg.get("field_map", {})
+    attach_field = field_map.get("attachments", ATTACH_FIELD)
+    source_field = field_map.get("source", "信息源")
+    created_field = cfg.get("created_at_field", "创建时间")
 
     try:
-        latest, files = load_latest()
-        record = build_record(latest, files)
+        latest = load_latest()
+        records = build_records(latest)
     except BitableSyncError as e:
         logger.error(f"[同步] 主产物读取失败: {e}")
         return 1
@@ -462,11 +544,9 @@ def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = No
     # dry-run：只验证数据组装，不依赖凭证与 API
     if dry_run:
         logger.info("[同步] dry-run: 仅打印待写入记录，不调用 API")
-        print(f"\n[dry-run] 日期: {record.get('日期')} | 附件 {len(files)} 个: "
-              f"{', '.join(f.name for f in files) or '(无)'}")
-        print(f"[dry-run] 源状态:\n{record.get('源状态')}")
-        print(f"[dry-run] 统计: {record.get('统计')}")
-        print(f"[dry-run] 简报内容:\n{record.get('简报内容')}")
+        print(f"\n[dry-run] 共 {len(records)} 个采集器有信息（无信息源不建行）:")
+        for rec in records:
+            _print_dry_run(rec, attach_field)
         return 0
 
     if not cfg.get("enabled"):
@@ -486,21 +566,40 @@ def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = No
     )
 
     try:
-        # 附件值（方案 A：全部 PDF 挂一个字段）
-        attachment_value = client.build_attachment_value(files)
-        fields = dict(record)
-        fields[cfg.get("field_map", {}).get("attachments", ATTACH_FIELD)] = attachment_value
+        # 1. 查重：各源今天是否已有行（按信息源过滤 → 客户端判创建时间是否今天）
+        existing: Dict[str, str] = {}
+        for rec in records:
+            src = rec.get(source_field, "")
+            if not src or src in existing:
+                continue
+            recs = client.list_records(
+                criteria=[{"field": source_field, "operator": "Equals", "values": [src]}]
+            )
+            for r in recs:
+                rid = r.get("record_id") or r.get("id")
+                ts = _parse_created_ts((r.get("fields") or {}).get(created_field))
+                if ts is not None and _is_today_local(ts):
+                    existing[src] = rid
+                    break
 
-        # upsert：按日期查已有记录
-        date_value = record.get("日期", "")
-        existing = client.list_records(date=date_value)
-        if existing:
-            rid = existing[0].get("record_id") or existing[0].get("id")
-            client.update_record(rid, fields)
-            logger.info(f"[同步] 已更新记录: {date_value} (record_id={rid}, 附件 {len(files)} 个)")
-        else:
-            rid = client.create_record(fields)
-            logger.info(f"[同步] 已创建记录: {date_value} (record_id={rid}, 附件 {len(files)} 个)")
+        # 2. 逐源 upsert（空值字段不写入；附件组装为 API 值）
+        for rec in records:
+            src = rec.get(source_field, "")
+            if not src:
+                continue
+            fields = {k: v for k, v in rec.items() if v not in ("", [], None)}
+            attach_info = fields.pop(attach_field, None) or {}
+            if attach_info.get("pdfs") or attach_info.get("txts"):
+                fields[attach_field] = _assemble_attachments(
+                    attach_info.get("pdfs", []), attach_info.get("txts", [])
+                )
+            if src in existing:
+                client.update_record(existing[src], fields)
+                logger.info(f"[同步] 已更新: {src} (record_id={existing[src]})")
+            else:
+                rid = client.create_record(fields)
+                logger.info(f"[同步] 已创建: {src} (record_id={rid})")
+        logger.info(f"[同步] 完成：{len(records)} 个采集器已同步")
         return 0
     except BitableSyncError as e:
         logger.error(f"[同步] 多维表格同步失败: {e}")
