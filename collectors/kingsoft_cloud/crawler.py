@@ -10,7 +10,6 @@
 4. 正文为空时，回退为标题。
 """
 
-import io
 import os
 import re
 import sys
@@ -20,13 +19,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
-
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from collectors.base import BaseCrawler
-from config.settings import CATEGORIES
+from config.settings import CATEGORIES, COLLECTORS
 from models.news import NewsItem
 
 
@@ -34,23 +30,33 @@ class KsyunCrawler(BaseCrawler):
     """金山云官网新闻采集器。"""
 
     source_name = "金山云官网"
-    source_code = "ksyun"
-    credibility_base = "【官网资讯】"
+    source_code = "kingsoft_cloud"
+    credibility_base = "【官方资讯】"
 
-    def __init__(self, hours_window: int = 720, enable_summary: bool = True):
+    def __init__(
+        self,
+        enable_summary: Optional[bool] = None,
+        hours_window: Optional[int] = None,
+    ) -> None:
+        # 时间窗口：显式参数 > 环境变量 KSYUN_HOURS_WINDOW > settings > 默认 24
+        config = COLLECTORS.get("kingsoft_cloud", {})
+        if hours_window is None:
+            try:
+                hours_window = int(
+                    os.getenv("KSYUN_HOURS_WINDOW") or config.get("hours_window", 24)
+                )
+            except (TypeError, ValueError):
+                hours_window = int(config.get("hours_window", 24))
+            if hours_window <= 0:
+                hours_window = int(config.get("hours_window", 24))
+
+        if enable_summary is None:
+            enable_summary = bool(config.get("enable_summary", True))
+
         super().__init__(enable_summary=enable_summary)
+
         self.hours_window = hours_window
-
-        try:
-            self.hours_window = int(
-                os.getenv("KSYUN_HOURS_WINDOW", str(hours_window))
-            )
-        except ValueError:
-            self.hours_window = hours_window
-
-        self.cutoff_time = datetime.now() - timedelta(
-            hours=self.hours_window
-        )
+        self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
         self.logger_info = (
             f"时间窗口：过去 {self.hours_window} 小时 "
             f"({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
@@ -310,7 +316,7 @@ class KsyunCrawler(BaseCrawler):
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=False)
+            browser = playwright.chromium.launch(headless=True)
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
                 user_agent=(
@@ -386,7 +392,7 @@ class KsyunCrawler(BaseCrawler):
 
 def main():
     """模块运行入口。"""
-    crawler = KsyunCrawler(enable_summary=True)
+    crawler = KsyunCrawler()
     items = crawler.run()
 
     crawler.logger.info(
