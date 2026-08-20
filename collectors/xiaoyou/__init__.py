@@ -2,6 +2,6 @@
 """
 西山居游戏采集器模块
 """
-from .crawler import XoyoCrawler
+from .crawler import XiaoYouCrawler
 
-__all__ = ['XoyoCrawler']
+__all__ = ['XiaoYouCrawler']

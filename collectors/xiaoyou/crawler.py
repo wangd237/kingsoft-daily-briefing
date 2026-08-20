@@ -1,142 +1,119 @@
 # -*- coding: utf-8 -*-
 """
-西山居游戏官网新闻采集器
+西山居游戏官网新闻采集器（剑网3 + 剑网3缘起）
+
 """
 import sys
-import io
+# 强制 UTF-8 输出（Windows 兼容）
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
-import os
-import re
+import json
 import time
+import re
 from datetime import datetime, timedelta
+from typing import List
 from pathlib import Path
-from typing import List, Optional
-from urllib.parse import urljoin
 
+import requests
+from playwright.sync_api import sync_playwright
+
+# sys.path hack，兼容从模块运行
 sys.path.append(str(Path(__file__).parent.parent.parent))
-
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from collectors.base import BaseCrawler
 from models.news import NewsItem
-from config.settings import COLLECTORS
 
 
-class XiaoyouCrawler(BaseCrawler):
-    """西山居游戏官网采集器。"""
+class XiaoYouCrawler(BaseCrawler):
+    """西山居游戏官网新闻采集器。"""
 
     source_name = "西山居游戏官网"
     source_code = "xiaoyou"
     credibility_base = "【官方资讯】"
 
-    LIST_URL = "https://games.xoyo.com/news"
     BASE_URL = "https://games.xoyo.com"
 
-    def __init__(self, enable_summary: bool = None, hours_window: int = None):
-        """
-        初始化
+    # 列表 JSON-RPC 接口（同一入口，不同 game_id）
+    YXFX_API_URL = "https://api-games.xoyo.com/api.php?op=yxfx_api"
 
-        Args:
-            enable_summary: 是否启用 AI 摘要
-            hours_window: 时间窗口（小时），默认24小时
-        """
-        config = COLLECTORS.get('xiaoyou', {})
+    # game_id:
+    # 1: 剑网3
+    # 20: 剑网3缘起
+    GAME_CHANNELS = [(1, "剑网3"), (20, "剑网3缘起")]
 
-        # 时间窗口（默认24小时）
-        self.hours_window = hours_window or config.get('hours_window', 24)
-        self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
-        self.logger_info = f"时间窗口: 过去{self.hours_window}小时 ({self.cutoff_time.strftime('%Y-%m-%d %H:%M')} 至今)"
-
-        # 从配置读取 enable_summary
-        if enable_summary is None:
-            enable_summary = config.get('enable_summary', True)
-
+    def __init__(self, enable_summary: bool = True, hours_window: int = 168):
         super().__init__(enable_summary=enable_summary)
+
+        try:
+            self.hours_window = int(
+                # 兼容你之前项目用的环境变量名
+                __import__("os").getenv("XOYO_HOURS_WINDOW", str(hours_window))
+            )
+            if self.hours_window <= 0:
+                raise ValueError
+        except Exception:
+            self.hours_window = hours_window
+
+        self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
 
     @staticmethod
     def _clean_text(text: str) -> str:
-        """清理文本空白。"""
         if not text:
             return ""
-        return re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
 
     @staticmethod
-    def _parse_date(date_text: str) -> Optional[datetime]:
-        """解析西山居页面日期。"""
-        if not date_text:
+    def _ts_to_datetime(ts) -> datetime | None:
+        try:
+            # 列表里 inputtime 一般是秒时间戳（或可转为 int 的数字）
+            return datetime.fromtimestamp(int(ts))
+        except Exception:
             return None
 
-        date_text = re.sub(r"\s+", " ", date_text.strip())
-        date_text = date_text.replace("发布于", "").replace("发布时间：", "").strip()
-
-        formats = [
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%d",
-            "%Y/%m/%d %H:%M:%S",
-            "%Y/%m/%d %H:%M",
-            "%Y/%m/%d",
-            "%Y年%m月%d日 %H:%M:%S",
-            "%Y年%m月%d日 %H:%M",
-            "%Y年%m月%d日",
-        ]
-
-        for fmt in formats:
-            try:
-                return datetime.strptime(date_text, fmt)
-            except ValueError:
-                continue
-
-        return None
-
     def _get_detail_content(self, page, url: str) -> str:
-        """进入详情页提取正文。"""
+        """进入详情页提取正文。使用 JS 端选择器数组，类似 gamersky/gamelook/ali213 模式。"""
         try:
-            page.goto(url, wait_until="networkidle", timeout=60000)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
 
-            try:
-                page.wait_for_selector(
+            content = page.evaluate("""() => {
+                const selectors = [
                     'div[class*="content"] div[class*="article"][class*="root"]',
-                    timeout=15000,
-                )
-            except PlaywrightTimeoutError:
-                pass
+                    'div[class*="article"][class*="root"]',
+                    'article[class*="content"]',
+                    'div[class*="article"]',
+                    'div[class*="content"]',
+                    "article",
+                    "main",
+                ];
 
-            content_selectors = [
-                'div[class*="content"] div[class*="article"][class*="root"]',
-                'div[class*="article"][class*="root"]',
-                'article[class*="content"]',
-                'div[class*="article"]',
-                'div[class*="content"]',
-                "article",
-                "main",
-            ]
+                for (const selector of selectors) {
+                    const elements = document.querySelectorAll(selector);
+                    for (const el of elements) {
+                        const text = el.innerText?.trim();
+                        if (text && text.length >= 30) {
+                            return text;
+                        }
+                    }
+                }
 
-            for selector in content_selectors:
-                try:
-                    elements = page.locator(selector)
-                    for index in range(elements.count()):
-                        text = self._clean_text(elements.nth(index).inner_text())
-                        if len(text) >= 30:
-                            return text
-                except Exception:
-                    continue
-
-            try:
-                paragraphs = page.locator(
+                // 备用：段落拼接
+                const paragraphs = document.querySelectorAll(
                     'div[class*="content"] p, main p, article p'
-                ).all_inner_texts()
-                content = "\n".join(
-                    self._clean_text(item)
-                    for item in paragraphs
-                    if self._clean_text(item)
-                )
-                if len(content) >= 30:
-                    return content
-            except Exception:
-                pass
+                );
+                const texts = [];
+                paragraphs.forEach(p => {
+                    const text = p.innerText?.trim();
+                    if (text) texts.push(text);
+                });
+                const content = texts.join("\\n");
+                return content.length >= 30 ? content : "";
+            }""")
+
+            if content and len(content.strip()) >= 30:
+                return self._clean_text(content)
 
             self.logger.warning("未提取到正文: %s", url)
             return ""
@@ -145,8 +122,8 @@ class XiaoyouCrawler(BaseCrawler):
             self.logger.warning("获取详情页失败: %s，原因: %s", url, exc)
             return ""
 
-    def _build_summary(self, title: str, content: str) -> tuple:
-        """优先使用 AI 摘要，失败时回退至正文或标题。"""
+    def _build_summary(self, title: str, content: str) -> tuple[str, datetime | None]:
+        """优先使用 BaseCrawler 的 generate_summary，失败时回退至正文或标题。"""
         summary = ""
         summary_generated_at = None
 
@@ -158,6 +135,7 @@ class XiaoyouCrawler(BaseCrawler):
 
         summary = self._clean_text(summary)
         if summary:
+            # 约束长度（避免摘要过长撑爆后处理）
             return summary[:150], summary_generated_at
 
         fallback = self._clean_text(content)
@@ -166,97 +144,111 @@ class XiaoyouCrawler(BaseCrawler):
 
         return title, None
 
+    def _yxfx_fetch_list(
+        self,
+        game_id: int,
+        page: int = 1,
+        num: int = 10,
+        article_type: str = "",
+        timeout: int = 30,
+    ) -> List[dict]:
+        """通过 yxfx_api 拉取新闻列表。"""
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "get_game_news_list",
+            "id": f"get_game_news_list_{game_id}_{page}_{num}",
+            "params": {
+                "page": page,
+                "num": num,
+                "game_id": str(game_id),
+                "article_type": article_type,
+            },
+        }
+
+        r = requests.post(
+            self.YXFX_API_URL,
+            headers=headers,
+            data=json.dumps(payload, ensure_ascii=False),
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data.get("result", {}).get("list", [])
+
     def fetch(self) -> List[NewsItem]:
-        """采集新闻列表及详情正文。"""
+        """采集新闻列表及详情正文（支持 剑网3 + 剑网3缘起）。"""
         items: List[NewsItem] = []
         seen_urls = set()
 
-        # 批次目录保护：支持调度器注入 BATCH_DIR
-        if not self._batch_dir:
-            now = datetime.now()
-            date_dir = now.strftime('%Y/%m/%d')
-            batch_name = now.strftime(f'{self.source_code}_%Y%m%d_%H%M%S')
-            self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
-            os.makedirs(self._batch_dir, exist_ok=True)
-
         self.logger.info(
-            "开始采集%s，%s", self.source_name, self.logger_info
+            "开始采集西山居游戏官网新闻，时间窗口：过去 %s 小时（%s 至今）",
+            self.hours_window,
+            self.cutoff_time.strftime("%Y-%m-%d %H:%M"),
         )
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
             context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
+                viewport={"width": 1440, "height": 1200},
                 user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
             )
-            list_page = context.new_page()
             detail_page = context.new_page()
 
             try:
-                list_page.goto(self.LIST_URL, wait_until="networkidle", timeout=60000)
-                list_page.wait_for_selector(
-                    'a[href^="/content/news/?id="]', timeout=20000
-                )
-
-                links = list_page.locator('a[href^="/content/news/?id="]')
-                total = links.count()
-                self.logger.info("列表页发现新闻链接：%s 条", total)
-
-                for index in range(total):
+                for game_id, channel_name in self.GAME_CHANNELS:
+                    news_list = []
                     try:
-                        link = links.nth(index)
-                        href = link.get_attribute("href") or ""
-                        url = urljoin(self.BASE_URL, href)
-
-                        if not href or not url or url in seen_urls:
-                            continue
-
-                        title_locator = link.locator('[class*="newsTitle"]')
-                        time_locator = link.locator('[class*="newsTime"]')
-                        title = (
-                            self._clean_text(title_locator.first.inner_text())
-                            if title_locator.count() > 0
-                            else ""
+                        news_list = self._yxfx_fetch_list(game_id=game_id, page=1, num=20)
+                    except Exception as exc:
+                        self.logger.warning(
+                            "拉取列表失败: game_id=%s err=%s",
+                            game_id,
+                            exc,
                         )
-                        date_text = (
-                            self._clean_text(time_locator.first.inner_text())
-                            if time_locator.count() > 0
-                            else ""
-                        )
+                        news_list = []
 
-                        if not title or not date_text:
-                            self.logger.warning(
-                                "跳过缺少标题或日期的新闻：title=%r, date=%r",
-                                title,
-                                date_text,
-                            )
-                            continue
+                    if not news_list:
+                        self.logger.info("game_id=%s 无新数据", game_id)
+                        continue
 
-                        publish_time = self._parse_date(date_text)
+                    for index_in_page, item in enumerate(news_list):
+                        dynamic_id = item.get("dynamic_id")
+                        title = self._clean_text(item.get("title") or "")
+                        inputtime = item.get("inputtime")
+
+                        publish_time = self._ts_to_datetime(inputtime)
                         if not publish_time:
-                            self.logger.warning(
-                                "跳过无法解析日期的新闻：%s，标题：%s",
-                                date_text,
-                                title,
-                            )
                             continue
 
                         if publish_time < self.cutoff_time:
-                            self.logger.info(
-                                "跳过超出时间范围新闻：%s - %s",
-                                publish_time.strftime("%Y-%m-%d"),
-                                title,
-                            )
+                            # 列表通常按时间倒序，这里继续看同页是否有未超出窗口的
                             continue
 
+                        if not dynamic_id or not title:
+                            continue
+
+                        url = f"{self.BASE_URL}/content/news/?id={dynamic_id}&gameId={game_id}"
+                        if url in seen_urls:
+                            continue
                         seen_urls.add(url)
+
                         self.logger.info(
-                            "采集详情（%s）：%s - %s",
+                            "采集详情（%s | %s）：%s - %s",
                             len(items) + 1,
+                            channel_name,
                             publish_time.strftime("%Y-%m-%d"),
                             title,
                         )
@@ -278,16 +270,16 @@ class XiaoyouCrawler(BaseCrawler):
                                 summary_generated_at=summary_generated_at,
                                 content=content,
                                 raw_data={
-                                    "list_url": self.LIST_URL,
-                                    "original_date": date_text,
-                                    "index": index,
+                                    "game_id": game_id,
+                                    "channel_name": channel_name,
+                                    "dynamic_id": dynamic_id,
+                                    "inputtime": inputtime,
+                                    "index_in_page": index_in_page,
                                 },
                             )
                         )
-                        time.sleep(0.5)
 
-                    except Exception as exc:
-                        self.logger.warning("处理第 %s 条新闻失败: %s", index + 1, exc)
+                        time.sleep(0.5)
 
             finally:
                 context.close()
@@ -298,22 +290,8 @@ class XiaoyouCrawler(BaseCrawler):
 
 
 def main():
-    """测试运行"""
-    import os
-
-    hours_window = int(os.getenv('XIAOYOU_HOURS_WINDOW', '48'))
-    crawler = XiaoyouCrawler(hours_window=hours_window)
-    items = crawler.run()
-
-    print(f"\n{'='*60}")
-    print(f"{crawler.source_name}采集结果: {len(items)} 条")
-    print(f"时间窗口: 过去{hours_window}小时")
-    print('='*60)
-
-    for i, item in enumerate(items, 1):
-        print(f"\n{i}. [{item.category}] {item.title}")
-        print(f"   日期: {item.date}")
-        print(f"   链接: {item.url}")
+    crawler = XiaoYouCrawler(enable_summary=True)
+    crawler.run()
 
 
 if __name__ == "__main__":
