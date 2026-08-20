@@ -47,7 +47,7 @@ class WeiboCrawler(BaseCrawler):
         self.accounts = config.get("accounts", [])
         self.tracked_uids = {str(account.get("uid")) for account in self.accounts}
 
-        self.max_pages_per_account = 3
+        self.max_pages_per_account = 1
         self.hours_window = hours_window or config.get("hours_window", 24)
         self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
         self.logger_info = (
@@ -447,12 +447,6 @@ class WeiboCrawler(BaseCrawler):
         self.logger.info(f"开始采集微博 - 账号数: {len(self.accounts)}")
         self.logger.info(self.logger_info)
 
-        now = datetime.now()
-        date_dir = now.strftime("%Y/%m/%d")
-        batch_name = now.strftime(f"{self.source_code}_%Y%m%d_%H%M%S")
-        self._batch_dir = f"{self.output_dir}/{self.source_code}/{date_dir}/{batch_name}"
-        os.makedirs(self._batch_dir, exist_ok=True)
-
         for account in self.accounts:
             posts = self._fetch_account_posts(account)
 
@@ -548,7 +542,8 @@ class WeiboCrawler(BaseCrawler):
 
 def main():
     """运行微博采集器。"""
-    hours_window = int(os.getenv("WEIBO_HOURS_WINDOW", "720"))
+    config = COLLECTORS.get("weibo", {})
+    hours_window = int(os.getenv("WEIBO_HOURS_WINDOW") or config.get("hours_window", 24))
 
     crawler = WeiboCrawler(hours_window=hours_window)
     items = crawler.run()
