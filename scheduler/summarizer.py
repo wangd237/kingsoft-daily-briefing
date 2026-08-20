@@ -115,6 +115,9 @@ def _to_latest_item(item: NewsItem) -> dict:
         "category": item.category,
         "summary": item.summary,
         "pdf_path": (item.raw_data or {}).get("pdf_path", ""),
+        # 无 PDF 时取正文用：content_ref 相对 batch_dir 定位（batch_dir 为批次目录绝对路径）
+        "content_ref": item.content_ref,
+        "batch_dir": (item.raw_data or {}).get("_batch_dir", ""),
         "fetch_time": item.raw_data.get("_fetch_time", ""),
     }
 
