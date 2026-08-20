@@ -384,7 +384,7 @@ class HKEXCrawler(BaseCrawler):
 
                     # 创建基础 NewsItem
                     item = NewsItem(
-                        title=f"{stock_name}: {title}",
+                        title=title,
                         date=parsed_date,
                         url=url,
                         source=f"港交所-{stock_name}",

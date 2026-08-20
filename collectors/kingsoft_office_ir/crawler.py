@@ -693,7 +693,7 @@ class KingsoftOfficeIRCrawler(BaseCrawler):
                         raw_data['pdf_path'] = rel_pdf_path
 
                     item = NewsItem(
-                        title=f"[{tab_type}] {title}" if tab_type else title,
+                        title=title,
                         date=news_time.strftime('%Y-%m-%d'),
                         url=full_url,
                         source=self.source_name,
