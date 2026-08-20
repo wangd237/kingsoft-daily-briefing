@@ -129,7 +129,7 @@ COLLECTORS = {
         'enable_summary': False,
     },
     'xiaoyou': {
-        'enabled': False,
+        'enabled': True,
         'name': '西山居游戏',
         'credibility': '【官方资讯】',
         'enable_summary': True,

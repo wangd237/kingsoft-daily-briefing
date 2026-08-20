@@ -4,16 +4,14 @@
 
 """
 import sys
-# 强制 UTF-8 输出（Windows 兼容）
-sys.stdout.reconfigure(encoding='utf-8')
-sys.stderr.reconfigure(encoding='utf-8')
 
 import json
-import time
+import os
 import re
+import time
 from datetime import datetime, timedelta
-from typing import List
 from pathlib import Path
+from typing import Dict, List, Optional
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -22,13 +20,14 @@ from playwright.sync_api import sync_playwright
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from collectors.base import BaseCrawler
+from config.settings import CATEGORIES, COLLECTORS
 from models.news import NewsItem
 
 
 class XiaoYouCrawler(BaseCrawler):
     """西山居游戏官网新闻采集器。"""
 
-    source_name = "西山居游戏官网"
+    source_name = "西山居游戏"
     source_code = "xiaoyou"
     credibility_base = "【官方资讯】"
 
@@ -42,19 +41,29 @@ class XiaoYouCrawler(BaseCrawler):
     # 20: 剑网3缘起
     GAME_CHANNELS = [(1, "剑网3"), (20, "剑网3缘起")]
 
-    def __init__(self, enable_summary: bool = True, hours_window: int = 168):
+    def __init__(
+        self,
+        enable_summary: Optional[bool] = None,
+        hours_window: Optional[int] = None,
+    ) -> None:
+        # 时间窗口：显式参数 > 环境变量 XOYO_HOURS_WINDOW > settings > 默认 168
+        config = COLLECTORS.get("xiaoyou", {})
+        if hours_window is None:
+            try:
+                hours_window = int(
+                    os.getenv("XOYO_HOURS_WINDOW") or config.get("hours_window", 168)
+                )
+            except (TypeError, ValueError):
+                hours_window = 168
+            if hours_window <= 0:
+                hours_window = int(config.get("hours_window", 168))
+
+        if enable_summary is None:
+            enable_summary = bool(config.get("enable_summary", True))
+
         super().__init__(enable_summary=enable_summary)
 
-        try:
-            self.hours_window = int(
-                # 兼容你之前项目用的环境变量名
-                __import__("os").getenv("XOYO_HOURS_WINDOW", str(hours_window))
-            )
-            if self.hours_window <= 0:
-                raise ValueError
-        except Exception:
-            self.hours_window = hours_window
-
+        self.hours_window = hours_window
         self.cutoff_time = datetime.now() - timedelta(hours=self.hours_window)
 
     @staticmethod
@@ -72,11 +81,48 @@ class XiaoYouCrawler(BaseCrawler):
         except Exception:
             return None
 
+    def _auto_classify(self, title: str) -> str:
+        """按统一 CATEGORIES 自动分类，未命中默认「产品动态」（游戏官网默认分类）。"""
+        title_lower = title.lower()
+        scores: Dict[str, int] = {}
+        for category, rules in CATEGORIES.items():
+            score = sum(1 for kw in rules.get("keywords", []) if kw in title_lower)
+            if score > 0:
+                scores[category] = score
+        if not scores:
+            return "产品动态"
+        return max(scores, key=lambda k: scores[k])
+
     def _get_detail_content(self, page, url: str) -> str:
         """进入详情页提取正文。使用 JS 端选择器数组，类似 gamersky/gamelook/ali213 模式。"""
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2000)
+            # SPA 页面正文由 JS 动态渲染：显式等待正文容器出现，避免固定 sleep 的时序竞态
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const sels = [
+                            'div[class*="content"] div[class*="article"][class*="root"]',
+                            'div[class*="article"][class*="root"]',
+                            'article[class*="content"]',
+                            'div[class*="article"]',
+                            'div[class*="content"]',
+                            'article',
+                            'main',
+                        ];
+                        for (const s of sels) {
+                            for (const el of document.querySelectorAll(s)) {
+                                const t = (el.innerText || '').trim();
+                                if (t.length >= 30) return true;
+                            }
+                        }
+                        return false;
+                    }""",
+                    timeout=3000,
+                )
+            except Exception:
+                pass  # 渲染超时则兜底，继续走下方直接提取
+            page.wait_for_timeout(500)
 
             content = page.evaluate("""() => {
                 const selectors = [
@@ -196,7 +242,7 @@ class XiaoYouCrawler(BaseCrawler):
         )
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=True)
             context = browser.new_context(
                 viewport={"width": 1440, "height": 1200},
                 user_agent=(
@@ -264,7 +310,7 @@ class XiaoYouCrawler(BaseCrawler):
                                 source=self.source_name,
                                 source_code=self.source_code,
                                 credibility_tag=self.credibility_base,
-                                category="产品动态",
+                                category=self._auto_classify(title),
                                 publish_time=publish_time,
                                 summary=summary,
                                 summary_generated_at=summary_generated_at,
@@ -290,7 +336,7 @@ class XiaoYouCrawler(BaseCrawler):
 
 
 def main():
-    crawler = XiaoYouCrawler(enable_summary=True)
+    crawler = XiaoYouCrawler()
     crawler.run()
 
 
