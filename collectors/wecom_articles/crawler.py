@@ -1,34 +1,37 @@
 # -*- coding: utf-8 -*-
 """
-公众号文章采集器（CLI 版本）
-通过 wps365 CLI 读取 WPS 多维表格中的公众号文章链接，抓取正文内容。
+公众号文章采集器
+通过 BitableClient 读取 WPS 多维表格中的公众号文章链接，抓取正文内容。
 
 工作流程：
-1. 调用 wps365 CLI 读取多维表格记录
-2. 按创建时间筛选前一天的记录
-3. 提取"链接"字段中的文章 URL
+1. 通过 BitableClient 读取多维表格记录（复用 sync_bitable 的 OAuth token）
+2. 按创建时间筛选今天的记录
+3. 提取"文章链接"字段中的 URL
 4. 访问每个 URL 抓取公众号文章正文
 5. 返回 NewsItem 列表供项目统一处理
 
 前置依赖：
-- wps365 CLI 已安装并认证（由 skill 的 setup.sh 和 auth.sh 自动处理）
+- 已运行 scripts/wps_authorize.py 完成 OAuth 授权（output/wps_token.json）
+- 在 WPS 多维表格中手动创建"公众号链接收集" Sheet，字段：文章链接、公众号、备注、创建时间
 """
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 import json
 import logging
 import os
 import re
-import subprocess
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from scheduler.sync_bitable import BitableClient, BitableSyncError
 from collectors.base import BaseCrawler
 from models.news import NewsItem
 from config.settings import COLLECTORS
@@ -40,91 +43,6 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
-
-
-# ---------------------------------------------------------------- CLI 调用辅助
-
-# wps365 CLI 路径：优先使用项目内副本，回退到系统 PATH
-_WPS365_BIN = Path(__file__).parent.parent.parent / "tools" / "bin" / "wps365.exe"
-if not _WPS365_BIN.exists():
-    _WPS365_BIN = "wps365"  # 回退到系统 PATH
-
-
-def run_wps365_cli(args: List[str], timeout: int = 60) -> dict:
-    """
-    调用 wps365 CLI 并返回 JSON 结果
-
-    Args:
-        args: CLI 参数列表（不含 wps365 前缀）
-        timeout: 超时时间（秒）
-
-    Returns:
-        解析后的 JSON 字典
-
-    Raises:
-        RuntimeError: CLI 调用失败
-    """
-    cmd = [str(_WPS365_BIN)] + args + ["-o", "json"]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        encoding='utf-8',
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"CLI 调用失败: {' '.join(cmd)}\n"
-            f"stdout: {result.stdout[:500]}\n"
-            f"stderr: {result.stderr[:500]}"
-        )
-
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"CLI 输出解析失败: {e}\nstdout: {result.stdout[:500]}"
-        )
-
-
-def read_bitable_records(file_id: str, sheet_id: int) -> List[dict]:
-    """
-    通过 wps365 CLI 读取多维表格全部记录
-
-    Args:
-        file_id: 多维表格 file_id
-        sheet_id: 工作表 sheet_id
-
-    Returns:
-        记录列表
-    """
-    all_records = []
-    page_token = ""
-
-    for _ in range(100):  # 防死循环
-        args = [
-            "dbsheet", "record", "list",
-            str(file_id),
-            str(sheet_id),
-            "--page-size", "100",
-        ]
-        if page_token:
-            args.extend(["--page-token", page_token])
-
-        data = run_wps365_cli(args)
-
-        if data.get("code") != 0:
-            raise RuntimeError(f"读取记录失败: {data.get('msg', '未知错误')}")
-
-        records = data.get("data", {}).get("records") or []
-        all_records.extend(records)
-
-        page_token = data.get("data", {}).get("page_token") or ""
-        if not page_token:
-            break
-
-    return all_records
 
 
 # ---------------------------------------------------------------- 采集器
@@ -167,19 +85,23 @@ class WecomArticlesCrawler(BaseCrawler):
         if self.test_mode:
             self.logger.info("测试模式已启用：将处理所有有链接的记录（跳过日期筛选）")
 
-    def _get_yesterday_str(self) -> str:
-        """获取昨天日期字符串 YYYY/MM/DD"""
-        yesterday = datetime.now() - timedelta(days=1)
-        return yesterday.strftime('%Y/%m/%d')
+    def _get_today_str(self) -> str:
+        """获取今天日期字符串 YYYY/MM/DD"""
+        return datetime.now().strftime('%Y/%m/%d')
 
     def _parse_created_time(self, time_str: str) -> Optional[datetime]:
-        """解析 CreatedTime 字段（格式如 '2026/08/20 14:57:58'）"""
+        """解析 CreatedTime 字段（格式如 '2026/08/21 14:57:58' 或 '2026/08/21 星期四 16:10'）"""
         if not time_str:
             return None
 
+        # 去掉星期部分（如 "星期四"），保留日期和时间
+        time_str = re.sub(r'\s*星期[一二三四五六日]\s*', ' ', time_str.strip())
+
         formats = [
             '%Y/%m/%d %H:%M:%S',
+            '%Y/%m/%d %H:%M',
             '%Y-%m-%d %H:%M:%S',
+            '%Y-%m-%d %H:%M',
             '%Y-%m-%dT%H:%M:%S',
             '%Y-%m-%dT%H:%M:%SZ',
             '%Y-%m-%dT%H:%M:%S+08:00',
@@ -202,14 +124,14 @@ class WecomArticlesCrawler(BaseCrawler):
 
         return None
 
-    def _is_yesterday(self, time_str: str) -> bool:
-        """判断时间是否是昨天（测试模式下总是返回 True）"""
+    def _is_today(self, time_str: str) -> bool:
+        """判断时间是否是今天（测试模式下总是返回 True）"""
         if self.test_mode:
             return True
         dt = self._parse_created_time(time_str)
         if not dt:
             return False
-        return dt.date() == (datetime.now() - timedelta(days=1)).date()
+        return dt.date() == datetime.now().date()
 
     def _fetch_article_content(self, url: str) -> str:
         """抓取公众号文章正文内容"""
@@ -337,8 +259,8 @@ class WecomArticlesCrawler(BaseCrawler):
     def fetch(self) -> List[NewsItem]:
         """
         采集数据的主流程：
-        1. 通过 wps365 CLI 读取多维表格记录
-        2. 筛选昨天的记录
+        1. 通过 BitableClient 读取多维表格记录
+        2. 筛选今天的记录
         3. 抓取每篇文章的内容
         4. 返回 NewsItem 列表
         """
@@ -351,12 +273,19 @@ class WecomArticlesCrawler(BaseCrawler):
             return all_items
 
         try:
-            # 读取全部记录
-            self.logger.info("正在通过 wps365 CLI 读取记录...")
-            records = read_bitable_records(self.file_id, self.sheet_id)
+            # 通过 BitableClient 读取记录（复用 OAuth token，无需 wps365 CLI）
+            self.logger.info("正在通过 BitableClient 读取记录...")
+            client = BitableClient(
+                app_id=os.environ.get('WPS_APP_ID', ''),
+                app_key=os.environ.get('WPS_APP_KEY', ''),
+                file_id=self.file_id,
+                sheet_id=self.sheet_id,
+                logger=self.logger,
+            )
+            records = client.list_records()
             self.logger.info(f"共读取 {len(records)} 条记录")
 
-            # 筛选昨天的记录
+            # 筛选今天的记录
             yesterday_items = []
             for record in records:
                 fields_str = record.get('fields', '')
@@ -365,13 +294,13 @@ class WecomArticlesCrawler(BaseCrawler):
                 else:
                     fields = fields_str
 
-                # 解析创建时间
-                created_time = fields.get('日期', '')
-                if not created_time or not self._is_yesterday(created_time):
+                # 解析创建时间（筛选今天贴入的链接）
+                created_time = fields.get('创建时间', '')
+                if not created_time or not self._is_today(created_time):
                     continue
 
-                # 提取链接
-                url = fields.get('链接', '').strip()
+                # 提取文章链接
+                url = fields.get('文章链接', '').strip()
                 if not url:
                     continue
 
@@ -389,7 +318,7 @@ class WecomArticlesCrawler(BaseCrawler):
                     'record_id': record.get('id', ''),
                 })
 
-            self.logger.info(f"筛选出昨天 {len(yesterday_items)} 条公众号文章")
+            self.logger.info(f"筛选出今天 {len(yesterday_items)} 条公众号文章")
 
             # 抓取每篇文章的内容
             for idx, item in enumerate(yesterday_items, 1):
@@ -459,8 +388,8 @@ class WecomArticlesCrawler(BaseCrawler):
                 all_items.append(news_item)
                 time.sleep(0.5)  # 请求间隔
 
-        except RuntimeError as e:
-            self.logger.error(f"wps365 CLI 调用失败: {e}")
+        except BitableSyncError as e:
+            self.logger.error(f"读取多维表格失败: {e}")
         except Exception as e:
             self.logger.error(f"采集异常: {e}", exc_info=True)
 

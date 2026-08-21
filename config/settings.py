@@ -71,10 +71,10 @@ COLLECTORS = {
         'name': '公众号文章',
         'credibility': '【官方资讯】',
         'enable_summary': True,
-        # WPS 多维表格配置（从 .env 读取）
-        'file_id': os.environ.get('WECOM_ARTICLES_FILE_ID', 'rm83K93cHxM1nPrWYV8wrxrW5MK5Jf7js'),
-        'sheet_id': int(os.environ.get('WECOM_ARTICLES_SHEET_ID', '1')),
-        'token_file': os.environ.get('WECOM_ARTICLES_TOKEN_FILE', str(OUTPUT_DIR / 'wecom_articles_token.json')),
+        # WPS 多维表格配置（复用 BITABLE 的 app_id/app_key 和 OAuth token）
+        'file_id': os.environ.get('WPS_FILE_ID', ''),
+        'sheet_id': os.environ.get('WECOM_ARTICLES_SHEET_ID', ''),
+        'token_file': str(OUTPUT_DIR / 'wps_token.json'),
     },
     'weibo': {
         'enabled': True,

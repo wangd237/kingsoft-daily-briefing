@@ -261,6 +261,8 @@ class BaseCrawler(ABC):
             '%Y/%m/%d',      # 2025/12/31
             '%Y-%m-%d %H:%M:%S',
             '%Y-%m-%d %H:%M',
+            '%Y/%m/%d %H:%M:%S',  # 2025/12/31 14:57:58
+            '%Y/%m/%d %H:%M',      # 2025/12/31 14:57
         ]
 
         for fmt in formats:
