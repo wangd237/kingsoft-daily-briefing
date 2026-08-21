@@ -82,7 +82,9 @@ def collect_attachments(items: List[NewsItem], logger: logging.Logger) -> int:
         if not src.exists() or src.suffix.lower() != ".pdf":
             continue
 
-        base = f"{item.source_code}_{src.name}"
+        from utils import sanitize_filename
+        title_short = sanitize_filename(item.title, max_len=20)
+        base = f"{item.source_code}_{title_short}{src.suffix}" if title_short else f"{item.source_code}_{src.name}"
         name = base
         i = 1
         while name in used_names:
