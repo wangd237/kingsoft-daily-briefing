@@ -479,7 +479,7 @@ def _collect_source_attachments(
         text = _read_content_text(it)
         if text:
             from utils import sanitize_filename
-            title_short = sanitize_filename(it.get("title", ""), max_len=20)
+            title_short = sanitize_filename(it.get("title", ""))
             fname = f"{source_code}_{title_short}.txt" if title_short else f"{source_code}_{idx:03d}.txt"
             txts.append((fname, text))
     return pdfs, txts

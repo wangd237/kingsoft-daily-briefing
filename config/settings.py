@@ -66,18 +66,15 @@ COLLECTORS = {
         'enable_summary': True,
         'hours_window': 100,  # 时间窗口：24小时
     },
-    'wechat': {
-        'enabled': False,  # 待实现
-        'name': '微信公众号',
-        'accounts': [
-            '金山办公',
-            'WPS办公软件',
-            'WPS 365',
-            '西山居',
-            '剑网3',
-        ],
+    'wecom_articles': {
+        'enabled': True,
+        'name': '公众号文章',
         'credibility': '【官方资讯】',
-        'enable_summary': False,
+        'enable_summary': True,
+        # WPS 多维表格配置（从 .env 读取）
+        'file_id': os.environ.get('WECOM_ARTICLES_FILE_ID', 'rm83K93cHxM1nPrWYV8wrxrW5MK5Jf7js'),
+        'sheet_id': int(os.environ.get('WECOM_ARTICLES_SHEET_ID', '1')),
+        'token_file': os.environ.get('WECOM_ARTICLES_TOKEN_FILE', str(OUTPUT_DIR / 'wecom_articles_token.json')),
     },
     'weibo': {
         'enabled': True,

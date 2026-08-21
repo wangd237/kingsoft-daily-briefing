@@ -83,7 +83,7 @@ def collect_attachments(items: List[NewsItem], logger: logging.Logger) -> int:
             continue
 
         from utils import sanitize_filename
-        title_short = sanitize_filename(item.title, max_len=20)
+        title_short = sanitize_filename(item.title)
         base = f"{item.source_code}_{title_short}{src.suffix}" if title_short else f"{item.source_code}_{src.name}"
         name = base
         i = 1
