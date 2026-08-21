@@ -56,8 +56,8 @@ from config.settings import (
 # 用户级 access_token 有效期约 2 小时，留 10 分钟余量提前刷新
 TOKEN_TTL_SECONDS = 2 * 3600 - 600
 
-# 附件方案 A：不再写"附件"字段（服务端无素材库上传接口），改上传云文档取 link_url
-# 写入"附件链接"字段（表格需建"文本"类型列，一行一个链接）
+# 附件方案（实测打通）：云文档三步上传后，附件结构体（source=cloud, uploadId=短链接后缀）
+# 写入"附件"字段（原生卡片渲染+在线预览）；link_url 同时写"附件链接"字段作纯文本备份。
 ATTACH_FIELD = "附件"
 ATTACH_URL_FIELD = "附件链接"
 
@@ -310,10 +310,12 @@ class BitableClient:
             raise BitableSyncError(f"云盘列表缺少 drive_id: {items[:1]}")
         return self._drive_id
 
-    def upload_to_drive(self, file_name: str, content: bytes) -> str:
+    def upload_to_drive(self, file_name: str, content: bytes) -> Dict[str, Any]:
         """
         云文档三步上传（OAuth 可用）：request_upload → PUT 实体 → commit_upload。
-        返回可访问链接 link_url（如 https://www.kdocs.cn/l/xxxx）。
+        返回 cloud 附件结构体（可直接写多维表格"附件"字段，实测支持卡片渲染 + 在线预览）：
+          {fileName, size, source:"cloud", type, uploadId, linkUrl}
+        uploadId = link_url 短链接后缀（如 clbXHQnvCBzo），注意不是云文档 fileId/UniqueID。
         """
         drive_id = self._get_drive_id()
         parent_id = "0"  # 根目录（如需归档可改为云盘内文件夹 id）
@@ -362,8 +364,17 @@ class BitableClient:
         link_url = (data3.get("data") or {}).get("link_url")
         if not link_url:
             raise BitableSyncError(f"commit_upload 响应缺少 link_url: {data3}")
+        upload_id = link_url.rstrip("/").rsplit("/", 1)[-1]
+        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "txt"
         self.logger.info(f"[附件] 已上传云文档: {file_name} -> {link_url}")
-        return link_url
+        return {
+            "fileName": file_name,
+            "size": len(content),
+            "source": "cloud",
+            "type": ext,
+            "uploadId": upload_id,
+            "linkUrl": link_url,
+        }
 
 
 # ---------------------------------------------------------------- 数据组装
@@ -473,27 +484,27 @@ def _collect_source_attachments(
 
 def _upload_attachments(
     client: BitableClient, pdfs: List[Path], txts: List[Tuple[str, str]]
-) -> List[str]:
-    """把 PDF + 正文 txt 逐个上传云文档，返回 link_url 列表。
+) -> List[Dict[str, Any]]:
+    """把 PDF + 正文 txt 逐个上传云文档，返回 cloud 附件结构体数组（可写"附件"字段）。
     单个文件失败仅记日志并跳过（附件是增强信息，不阻断整行同步）。"""
-    links: List[str] = []
+    items: List[Dict[str, Any]] = []
     for pdf in pdfs:
         try:
-            links.append(client.upload_to_drive(pdf.name, pdf.read_bytes()))
+            items.append(client.upload_to_drive(pdf.name, pdf.read_bytes()))
         except BitableSyncError as e:
             client.logger.error(f"[附件] 上传失败 {pdf.name}: {e}")
     for name, text in txts:
         try:
-            links.append(client.upload_to_drive(name, text.encode("utf-8")))
+            items.append(client.upload_to_drive(name, text.encode("utf-8")))
         except BitableSyncError as e:
             client.logger.error(f"[附件] 上传失败 {name}: {e}")
-    return links
+    return items
 
 
 def _build_source_record(source_code: str, group: List[Dict[str, Any]]) -> Dict[str, Any]:
     """按源组装一条记录（列名以 BITABLE.field_map 为准）。
     附件列为内部结构 {pdfs, txts}：dry-run 仅展示；同步时由 _upload_attachments
-    上传云文档取链接，写入"附件链接"字段。"""
+    上传云文档，写"附件"字段（卡片）+ "附件链接"字段（备份链接）。"""
     field_map = BITABLE.get("field_map", {})
     # 表格 SingleSelect 选项是"官方公告/官方资讯/媒体报道"，配置值带【】装饰需剥掉
     credibility = (
@@ -645,7 +656,7 @@ def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = No
                     existing[src] = rid
                     break
 
-        # 2. 逐源 upsert（空值字段不写入；附件上传云文档取链接写"附件链接"字段）
+        # 2. 逐源 upsert（空值字段不写入；附件上传云文档：写"附件"卡片 + "附件链接"备份）
         for rec in records:
             src = rec.get(source_field, "")
             if not src:
@@ -653,11 +664,14 @@ def sync_to_bitable(dry_run: bool = False, logger: Optional[logging.Logger] = No
             fields = {k: v for k, v in rec.items() if v not in ("", [], None)}
             attach_info = fields.pop(attach_field, None) or {}
             if attach_info.get("pdfs") or attach_info.get("txts"):
-                links = _upload_attachments(
+                items = _upload_attachments(
                     client, attach_info.get("pdfs", []), attach_info.get("txts", [])
                 )
-                if links:
-                    fields[url_field] = "\n".join(links)
+                if items:
+                    # 「附件」写 cloud 卡片（source=cloud，uploadId=短链接后缀，原生渲染+预览）
+                    fields[attach_field] = items
+                    # 「附件链接」写纯文本备份（值已现成，零额外成本，便于复制/归档）
+                    fields[url_field] = "\n".join(it["linkUrl"] for it in items)
             if src in existing:
                 client.update_record(existing[src], fields)
                 logger.info(f"[同步] 已更新: {src} (record_id={existing[src]})")

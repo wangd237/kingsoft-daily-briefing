@@ -163,10 +163,19 @@ WPS 授权后会发**两个**凭证，角色完全不同：
 - 排查过程：确认 sheet_id 没错（`id=1` 是"数据表"，`id=2` 才是"仪表盘"）→ 字段管理里确实没有该列 → 逐字段二分 create 定位 → 发现**真凶是"采集时间"字段格式**。
 - 结论：`recordId: "G"` 对应表里**被删除过的字段 ID 残留**，WPS 服务端报错时会把异常字段名写成一个**迷惑性/残留字段名**。遇到 `invalidCellsInfo` 报错，别被 `fieldKey` 带偏，要**逐字段二分定位真正非法的字段**。
 
-### 2.9 附件写入（方案 A）
+### 2.9 附件写入（方案 A：原生卡片 + 链接备份，✅ 2026-08-20 升级）
 
-- 当天全部 PDF 挂到「附件」列（`Attachment` 类型），值为数组：`[{"fileData": "data:application/pdf;base64,...", "fileName": "xxx.pdf"}]`。
-- 单文件 ≤15MB 走 base64 直写（官方上限 20MB，保守取值）；**>15MB 会明确报错**（大文件上传流程尚未实现，见 §4.8）。
+- 当天全部 PDF / 正文 txt 走**云文档三步上传**（`request_upload` → PUT → `commit_upload`），拿 `link_url`（如 `https://www.kdocs.cn/l/clbXHQnvCBzo`）。
+- **「附件」列**（`Attachment` 类型）写 cloud 附件结构体数组，渲染**原生文件卡片**，点击可在线预览：
+
+  ```json
+  [{"fileName": "xxx.pdf", "size": 12345, "source": "cloud", "type": "pdf",
+    "uploadId": "clbXHQnvCBzo", "linkUrl": "https://www.kdocs.cn/l/clbXHQnvCBzo"}]
+  ```
+
+  > 关键：`uploadId` 必须是 `link_url` **短链接后缀**（`clbXHQnvCBzo`），**不是** `commit_upload` 返回的 fileId/UniqueID（填 UniqueID 会 500 `E_INVALIDARG`）。`source` 必须小写 `cloud`。
+- **「附件链接」列**（文本类型）同时写入各附件 `link_url`（多行），作纯文本备份——复制、归档、无权限兜底查看均可用，值已现成零额外成本。
+- 无大小限制顾虑：云文档上传对文件大小没有 base64 直写那种 15MB 上限约束。
 
 ---
 
@@ -232,6 +241,7 @@ AI_MODEL=
    | 日期 | Date |
    | 简报内容 | MultiLineText |
    | 附件 | Attachment（图片和附件） |
+   | 附件链接 | MultiLineText（文本备份，值为云文档短链接，一行一个） |
    | 源状态 | MultiLineText |
    | 统计 | MultiLineText |
    | 运行id | MultiLineText |
@@ -295,7 +305,7 @@ Linux cron：
 | 6 | 创建成功但脚本报"缺少 record_id" | 响应解析写错字段（老代码） | 从 `data.records[0].id` 取（当前代码已修复） |
 | 7 | 同步成功但表格里没有当天行 | `WPS_SHEET_ID` 填错（如填成仪表盘 2） | 用 `python scripts/inspect_bitable_sheets.py` 列 sheet，数据表 id=1 |
 | 8 | 同步后提示"用户 token 已失效，请重新授权" | refresh_token 过期（约 1 年） | 重跑 `wps_authorize.py` |
-| 9 | 附件写入报"超过 base64 直写上限" | PDF >15MB | 大文件上传流程未实现，需联调补全（§4.8），或控制单文件大小 |
+| 9 | 附件写入报 500 `E_INVALIDARG`（fieldKey: 附件） | `uploadId` 填了云文档 fileId/UniqueID | `uploadId` 必须填 `link_url` **短链接后缀**（`kdocs.cn/l/` 后那段），`source` 用 `cloud` |
 | 10 | 采集源全部失败/超时 | 目标站点网络不可达、反爬、代理 | 检查网络；`--skip-collect` 只同步现有产物不受影响 |
 | 11 | 同步日志不输出 | `--sync-only` 默认静默 | 以退出码为准（0=成功），或加日志级别调试 |
 
@@ -303,8 +313,8 @@ Linux cron：
 
 ## 6. 已知局限与后续待办（部署前务必周知）
 
-1. **大文件附件（>15MB）未实现**：`_upload_large_file()` 目前是明确报错占位。若目标环境的公告 PDF 普遍 >15MB，需在 open.wps.cn 调试台确认"获取上传附件/图片 URL"流程后补全，否则当天附件会整单失败（报错而非静默丢附件，不会产生脏数据）。
-2. **素材库容量**：每天 N 个 PDF × 365 天会持续占用企业素材库额度，目前无自动清理/归档策略，长期运行需评估。
+1. **云盘存储占用**：每天 N 个 PDF/正文 txt 上传为云文档，365 天持续占用个人/企业云盘额度，目前无自动清理/归档策略，长期运行需评估（附件为短链接引用，源云文档删除后卡片会失效，删除需谨慎）。
+2. **附件引用依赖**：`source:"cloud"` 卡片是**短链接引用**，源云文档被删除/移动会导致附件静默失效；建议保留「附件链接」列作为纯文本兜底。
 3. **同步失败无告警**：目前仅本地日志（`[同步] ... 失败`），未接入企业微信/飞书机器人。
 4. **token 敏感信息**：`output/wps_token.json` 内含用户级 token，部署机需做好文件权限/备份；refresh_token 过期需人工重授权（约 1 年一次）。
 5. **测试数据残留**：当前表里可能有日期为 `2099-01-01` 的调试记录（record_id I~Q 附近），新环境联调时留意清理，别当成生产数据。
@@ -341,7 +351,7 @@ python scripts/debug_bitable_create.py
 | 文件 | 作用 |
 |---|---|
 | `scripts/wps_authorize.py` | OAuth 授权码模式换取用户 token，持久化到 `output/wps_token.json` |
-| `scheduler/sync_bitable.py` | 同步客户端：KSO-1 签名、token 自动刷新、记录 CRUD、附件 base64 直写、upsert |
+| `scheduler/sync_bitable.py` | 同步客户端：KSO-1 签名、token 自动刷新、记录 CRUD、云文档三步上传（附件卡片+链接备份）、upsert |
 | `scheduler/main.py` | CLI 入口，`--sync-only` / `--sync-bitable` 等 |
 | `config/settings.py` | `BITABLE` 配置段（凭证、scope、field_map、开关），全部可被 `.env` 覆盖 |
 | `.env.example` | 环境变量模板 |
