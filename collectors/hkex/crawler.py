@@ -383,15 +383,19 @@ class HKEXCrawler(BaseCrawler):
                     parsed_datetime = self._parse_hkex_datetime(date)
 
                     # 创建基础 NewsItem
+                    # source_code 用配置层代号 "hkex"（与 settings.COLLECTORS 的 key 对齐，
+                    # 保证多维表格同步层能查到中文名/可信度并按源聚合）；
+                    # 股票区分保留在 source（港交所-金山软件）与 raw_data.stock_code 中
                     item = NewsItem(
                         title=title,
                         date=parsed_date,
                         url=url,
                         source=f"港交所-{stock_name}",
-                        source_code=f"hkex_{stock_code}",
+                        source_code=self.source_code,
                         credibility_tag=self.credibility_base,
                         category=self._auto_classify(title),
                         publish_time=parsed_datetime,
+                        raw_data={'stock_code': stock_code, 'stock_name': stock_name},
                     )
 
                     # 下载并解析 PDF（带上 cookies 和 referer）
@@ -401,9 +405,9 @@ class HKEXCrawler(BaseCrawler):
 
                         if pdf_path and content:
                             item.content = content
-                            # 存储相对路径（相对于批次目录）
+                            # 存储相对路径（相对于批次目录），merge 保留 stock_code/stock_name
                             rel_pdf_path = os.path.relpath(pdf_path, self._batch_dir)
-                            item.raw_data = {'pdf_path': rel_pdf_path}
+                            item.raw_data = {**item.raw_data, 'pdf_path': rel_pdf_path}
                             self.logger.info(f"  ✓ PDF 解析成功: {len(content)} 字符")
 
                             # 生成 AI 摘要（使用基类方法）
@@ -416,9 +420,9 @@ class HKEXCrawler(BaseCrawler):
                             else:
                                 self.logger.warning(f"  ✗ AI 摘要生成失败")
                         elif pdf_path:
-                            # 存储相对路径
+                            # 存储相对路径，merge 保留 stock_code/stock_name
                             rel_pdf_path = os.path.relpath(pdf_path, self._batch_dir)
-                            item.raw_data = {'pdf_path': rel_pdf_path}
+                            item.raw_data = {**item.raw_data, 'pdf_path': rel_pdf_path}
                             self.logger.warning(f"  ⚠ PDF 下载成功但文本提取失败")
                         else:
                             self.logger.warning(f"  ✗ PDF 下载失败")

@@ -417,7 +417,7 @@ class Ali213Crawler(BaseCrawler):
 
             content = page.evaluate("""() => {
                 // 优先使用 #Content（游侠网正文区域）
-                const el = document.querySelector('#Content') || document.querySelector('.n_show');
+                const el = document.querySelector('#Content') || document.querySelector('.n_show') || document.querySelector('.ol_detail_left_news') || document.querySelector('.detail_content') || document.querySelector('.TContL');
                 if (!el) {
                     return '';
                 }
