@@ -21,8 +21,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="仅运行指定源（逗号分隔），默认全部启用源",
     )
     parser.add_argument(
-        "--max-workers", type=int, default=4,
-        help="并发采集数，默认 4",
+        "--max-workers", type=int, default=None,
+        #help="并发采集数，默认 4",
+        help="并发采集数，默认取 settings 的 SCHEDULER.max_workers"
+
     )
     parser.add_argument(
         "--dry-run", action="store_true",

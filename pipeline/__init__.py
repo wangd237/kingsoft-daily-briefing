@@ -201,9 +201,12 @@ class DataPipeline:
         self.items = items
         return items
 
-    def generate_briefing(self, date: str = None, quiet: bool = False) -> str:
+    def generate_briefing(self, date: str = None, quiet: bool = False, format: str = 'both') -> str:
         """生成简报
+        :param date: 简报日期标题，默认今天
         :param quiet: 为 True 时不打印"简报已保存"（供调度器调用，避免日志重复）
+        :param format: 输出格式 'md' | 'html' | 'both'（默认 both 双产出）
+        :return: 生成的内容（当 format='both' 时返回 Markdown 内容）
         """
         if date is None:
             date = datetime.now().strftime('%Y年%m月%d日')
@@ -213,24 +216,38 @@ class DataPipeline:
         for item in self.items:
             briefing.add_item(item)
 
-        # 保存Markdown文件
-        md_content = briefing.to_markdown()
-
-        # 文件路径: output/briefings/2026/07/briefing_20260729.md
         now = datetime.now()
         year_dir = BRIEFING_DIR / now.strftime('%Y')
         month_dir = year_dir / now.strftime('%m')
         month_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = now.strftime('briefing_%Y%m%d.md')
-        file_path = month_dir / filename
+        base_filename = now.strftime('briefing_%Y%m%d')
+        generated_files = []
 
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(md_content)
+        # 生成 Markdown
+        if format in ('md', 'both'):
+            md_content = briefing.to_markdown()
+            md_path = month_dir / f"{base_filename}.md"
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write(md_content)
+            generated_files.append(('Markdown', md_path))
+            if not quiet:
+                print(f"\n简报已保存: {md_path}")
 
-        if not quiet:
-            print(f"\n简报已保存: {file_path}")
-        return md_content
+        # 生成 HTML
+        if format in ('html', 'both'):
+            html_content = briefing.to_html()
+            html_path = month_dir / f"{base_filename}.html"
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            generated_files.append(('HTML', html_path))
+            if not quiet:
+                print(f"\n简报已保存: {html_path}")
+
+        # 返回内容：both 时返回 MD，单格式时返回对应内容
+        if format == 'html':
+            return html_content
+        return md_content if format in ('md', 'both') else ''
 
 
 def main():

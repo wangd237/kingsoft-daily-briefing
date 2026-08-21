@@ -6,6 +6,32 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, Any
 from enum import Enum
+from collections import defaultdict
+
+
+# Jinja2 环境（单例，开启 autoescape 防 XSS）
+_JINJA_ENV = None
+
+
+def _get_jinja_env():
+    global _JINJA_ENV
+    if _JINJA_ENV is None:
+        from jinja2 import Environment, BaseLoader, select_autoescape
+        _JINJA_ENV = Environment(
+            loader=BaseLoader(),
+            autoescape=select_autoescape(['html', 'xml']),
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+        # 注册全局过滤器
+        def credibility_class(tag: str) -> str:
+            if '官方公告' in tag:
+                return 'official-notice'
+            elif '官方资讯' in tag:
+                return 'official-news'
+            return 'media-report'
+        _JINJA_ENV.filters['credibility_class'] = credibility_class
+    return _JINJA_ENV
 
 
 class CredibilityLevel(Enum):
@@ -241,3 +267,115 @@ class DailyBriefing:
         lines.append(f"*本简报由系统自动生成于 {self.generated_at.strftime('%Y-%m-%d %H:%M:%S')}*")
 
         return "\n".join(lines)
+
+    def to_html(self) -> str:
+        """生成HTML格式（内联CSS，适合邮件/网页直接渲染）"""
+        env = _get_jinja_env()
+
+        # 按分类分组
+        grouped = defaultdict(list)
+        for item in self.items:
+            grouped[item.category].append(item)
+
+        category_order = ['资本动态', '产品动态', '市场&政企合作', '活动IP', '人事&其他声明']
+
+        template = env.from_string("""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>金山系资讯日报 - {{ date }}</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px; background: #fafafa; }
+        .container { background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        h1 { color: #1a1a1a; border-bottom: 2px solid #e8e8e8; padding-bottom: 10px; margin-bottom: 20px; font-size: 1.8rem; }
+        .meta { color: #666; font-size: 0.9rem; margin-bottom: 20px; }
+        .stats { display: flex; gap: 20px; margin: 20px 0; padding: 15px; background: #f5f5f5; border-radius: 6px; }
+        .stat { font-weight: 600; }
+        .stat-label { color: #999; font-weight: 400; margin-right: 6px; }
+        hr { border: none; border-top: 1px solid #eee; margin: 24px 0; }
+        .category { margin-top: 24px; }
+        .category-title { color: #2c3e50; font-size: 1.3rem; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid #eee; }
+        .item { margin-bottom: 20px; padding: 16px; background: #fafafa; border-radius: 6px; border-left: 3px solid #3498db; }
+        .item-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 8px; color: #1a1a1a; }
+        .credibility { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-right: 8px; }
+        .credibility-official-notice { background: #ffeaa7; color: #b8860b; }
+        .credibility-official-news { background: #d4f6d4; color: #2d7d2d; }
+        .credibility-media-report { background: #e8e8e8; color: #555; }
+        .item-meta { color: #888; font-size: 0.85rem; margin-bottom: 8px; }
+        .item-meta span { margin-right: 16px; }
+        .item-meta a { color: #3498db; text-decoration: none; }
+        .item-meta a:hover { text-decoration: underline; }
+        .item-summary { color: #444; font-size: 0.95rem; }
+        .focus { margin-top: 24px; }
+        .focus-title { color: #e74c3c; font-size: 1.2rem; margin-bottom: 12px; }
+        .focus-list { list-style: none; padding: 0; }
+        .focus-list li { padding: 8px 12px; background: #fffbe6; border-radius: 4px; margin-bottom: 8px; border-left: 3px solid #f39c12; font-size: 0.9rem; }
+        .footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #eee; color: #999; font-size: 0.8rem; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>金山系资讯日报 - {{ date }}</h1>
+        <div class="meta">
+            采集时间：{{ generated_at.strftime('%Y-%m-%d %H:%M') }}
+        </div>
+        <div class="stats">
+            <span class="stat"><span class="stat-label">资讯总数：</span>{{ total_count }} 条</span>
+            <span class="stat"><span class="stat-label">官方公告：</span>{{ official_count }} 条</span>
+        </div>
+        <hr>
+
+        {% for category in category_order %}
+        {% if category in grouped %}
+        <div class="category">
+            <h2 class="category-title">{{ category }} ({{ grouped[category]|length }}条)</h2>
+            {% for item in grouped[category] %}
+            <div class="item">
+                <div class="item-title">
+                    <span class="credibility credibility-{{ item.credibility_tag|credibility_class }}">{{ item.credibility_tag }}</span>
+                    {{ item.title }}
+                </div>
+                <div class="item-meta">
+                    <span>来源：{{ item.source }}</span>
+                    <span>时间：{{ item.publish_time.strftime('%m-%d %H:%M') if item.publish_time else item.date }}</span>
+                    <span><a href="{{ item.url }}" target="_blank" rel="noopener">查看原文</a></span>
+                </div>
+                <div class="item-summary">{{ item.summary }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        <hr>
+        {% endif %}
+        {% endfor %}
+
+        {% if items %}
+        <div class="focus">
+            <h2 class="focus-title">⭐ 重点关注</h2>
+            <ul class="focus-list">
+            {% for item in items[:5] %}
+                <li><strong>{{ item.category }}</strong> | {{ item.title }} （{{ item.publish_time.strftime('%m-%d %H:%M') if item.publish_time else item.date }}）</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <hr>
+        <div class="footer">
+            本简报由系统自动生成于 {{ generated_at.strftime('%Y-%m-%d %H:%M:%S') }}
+        </div>
+    </div>
+</body>
+</html>
+""")
+
+        return template.render(
+            date=self.date,
+            generated_at=self.generated_at,
+            total_count=self.total_count,
+            official_count=self.official_count,
+            grouped=grouped,
+            category_order=category_order,
+            items=self.items,
+        )
